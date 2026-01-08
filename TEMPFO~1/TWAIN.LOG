@@ -1,0 +1,10 @@
+TWAIN_32.DLL - MESSAGE - CTwunk  ::AppInitialize - Reset Log
+TWAIN_32.DLL - MESSAGE - CTwunk  ::OpenServer - Starting Thunker
+TWAIN_32.DLL - MESSAGE - CTwunk  ::CloseServer - Why Can't We Find The Thunker Window?
+TWAIN_32.DLL - MESSAGE - DSM     --DsmEntryDiagExit (RC = 0, CC = 0)
+TWAIN_32.DLL - MESSAGE - CTWTRACE--TWAIN Python Interface(10) to NULL:
+TWAIN_32.DLL - MESSAGE - CTWTRACE--CONTROL, IDENTITY, USERSELECT
+TWAIN_32.DLL - MESSAGE - DSM     --DsmEntryDiagExit (RC = 3, CC = 0)
+TWAIN_32.DLL - MESSAGE - CTWTRACE--TWAIN Python Interface(10) to NULL:
+TWAIN_32.DLL - MESSAGE - CTWTRACE--CONTROL, PARENT, CLOSEDSM
+TWAIN_32.DLL - MESSAGE - DSM     --DsmEntryDiagExit (RC = 0, CC = FFFF)
