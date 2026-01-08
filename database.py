@@ -94,14 +94,30 @@ class DBManager:
         conn.close()
         print(f"DB 초기화 완료: {db_path}")
 
+# database.py 파일의 기존 insert_scan_result 함수를 이것으로 교체하세요.
+
     def insert_scan_result(self, db_path, data):
-        """스캔 결과 1건 저장 (나중에 스캐너 로직에서 호출)"""
+        """스캔 결과 1건 저장 (판독 데이터 포함)"""
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
+        
+        # SQL문에 mark_result(마킹내용)와 is_valid(유효표 여부) 컬럼 추가
         sql = '''
-            INSERT INTO tblScanData (read_num, scanner_name, room_no, image_path, scan_time)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO tblScanData 
+            (read_num, scanner_name, room_no, image_path, scan_time, sheet_code, mark_result, is_valid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         '''
-        cursor.execute(sql, (data['read_num'], data['place'], data['room'], data['path'], datetime.now()))
+        
+        # data 딕셔너리에서 필요한 값들을 뽑아서 저장
+        cursor.execute(sql, (
+            data['read_num'], 
+            data['place'], 
+            data['room'], 
+            data['path'], 
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            data.get('sheet_code', ''),  # 용지 코드 (없으면 빈칸)
+            data.get('mark_result', ''), # 판독 결과 (예: "10100...")
+            data.get('is_valid', 1)      # 유효표 여부 (1:정상, 0:오류)
+        ))
         conn.commit()
         conn.close()

@@ -94,6 +94,13 @@ class OMRScannerApp(QMainWindow):
         self.stack.setCurrentIndex(0)
         self.statusbar.showMessage("메인 화면으로 복귀했습니다.")
 
+# ui/main_window.py 파일 안의 on_db_changed 함수 수정
+
     def on_db_changed(self, path, title):
         self.setWindowTitle(f"김세윤omr_project - [{title}]")
         self.statusbar.showMessage(f"현재 열린 DB: {path}")
+        
+        # [추가됨] 스캐너 화면에 "이제 이 DB를 써!" 라고 알려주는 코드
+        # (scanner_view 안에 set_current_db 함수를 곧 만들 거예요)
+        if hasattr(self.scanner_view, 'set_current_db'):
+            self.scanner_view.set_current_db(path)
