@@ -21,22 +21,17 @@ from ui.scanner.popups.error_editor import ErrorCorrectionDialog
 def get_test_rois():
     # 제공해주신 이미지에 맞춘 대략적인 임시 좌표입니다.
     # 실행 후 'check_this.jpg'를 보고 박스가 밀려있으면 숫자를 조정하세요.
-    w, h = 35, 35       # 박스 크기
-    x_agree = 1130      # 찬성 박스 X좌표 (임시 추정)
-    x_disagree = 1275   # 반대 박스 X좌표 (임시 추정)
-    
-    start_y = 515       # 1번 문항 Y좌표 시작점
-    gap_y = 90          # 문항 간 간격
+        w, h = 35, 35       
+        x_agree = 954      
+        x_disagree = 1103   
+        start_y = 771       
+        gap_y = 120          
 
-    rois = []
-    for i in range(5):
-        y = start_y + (i * gap_y)
-        q_rois = [
-            (x_agree, y, w, h),    # 찬성
-            (x_disagree, y, w, h)  # 반대
-        ]
-        rois.append(q_rois)
-    return rois
+        rois = []
+        for i in range(5):
+            y = start_y + (i * gap_y)
+            rois.append([(x_agree, y, w, h), (x_disagree, y, w, h)])
+        return rois
 
 def main():
     print("--- [1] 프로그램 시작 ---")
@@ -44,7 +39,7 @@ def main():
     
     # 1. 경로 확인
     # 테스트할 파일명을 여기에 적어주세요.
-    target_filename = "100000004.jpg" 
+    target_filename = "100000001.jpg" 
     img_path = os.path.join("data", "scan_images", target_filename)
     
     print(f"--- [2] 이미지 찾는 중: {os.path.abspath(img_path)}")

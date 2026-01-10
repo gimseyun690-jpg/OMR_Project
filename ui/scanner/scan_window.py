@@ -12,6 +12,7 @@ from logic.scanner_core import ScannerDevice
 # ★ 기능 연결을 위해 추가된 모듈
 from logic.omr_engine import OMREngine
 from database import DBManager
+from ui.scanner.popups.error_editor import ErrorCorrectionDialog # 팝업창
 
 # =========================================================
 # [스캔 워커 스레드] - 백그라운드에서 스캐너 돌리기 (유지)
@@ -79,6 +80,9 @@ class ScannerReadingView(QWidget):
         self.engine = OMREngine()
         self.db = DBManager()
         self.current_db_path = None # 현재 열린 DB 경로
+        
+        # [중요] 기준점 좌표 (find.py로 잰 검은 네모 위치) - 필요시 수정하세요
+        self.ref_anchor = (100, 500) 
 
         # UI 초기화 (원래 디자인 함수 호출)
         self.init_ui()
@@ -152,8 +156,16 @@ class ScannerReadingView(QWidget):
         st_combo = "QComboBox { border: 1px solid #999; padding: 2px; font-size: 12px; font-weight: bold; color: black; }"
         
         self.cb_form = QComboBox(); self.cb_form.addItem("OMR_Project"); self.cb_form.setStyleSheet(st_combo)
-        self.cb_place = QComboBox(); self.cb_place.addItem("스캐너1"); self.cb_place.setStyleSheet(st_combo)
-        self.cb_room = QComboBox(); self.cb_room.addItem("1"); self.cb_room.setStyleSheet(st_combo)
+        
+        # [수정] 스캐너 1~10 추가
+        self.cb_place = QComboBox(); self.cb_place.setStyleSheet(st_combo)
+        for i in range(1, 11):
+            self.cb_place.addItem(f"스캐너{i}")
+            
+        # [수정] 시험실 1~999 추가 (넉넉하게)
+        self.cb_room = QComboBox(); self.cb_room.setStyleSheet(st_combo)
+        for i in range(1, 1000):
+            self.cb_room.addItem(str(i))
 
         grid_set.addWidget(QLabel("스캔OMR양식 :", styleSheet=st_blue_lbl), 0, 0)
         grid_set.addWidget(self.cb_form, 0, 1)
@@ -161,7 +173,6 @@ class ScannerReadingView(QWidget):
         grid_set.addWidget(self.cb_place, 1, 1)
         grid_set.addWidget(QLabel("판독 시험실 :", styleSheet="font-weight:bold; border:none;"), 2, 0)
         grid_set.addWidget(self.cb_room, 2, 1)
-
         # (1-3) 우측: 오류점검 설정
         grp_err = QGroupBox("오류점검")
         grp_err.setStyleSheet("background-color: white; border: 1px solid #999; font-size: 11px;")
@@ -239,15 +250,17 @@ class ScannerReadingView(QWidget):
     def set_current_db(self, db_path):
         """메인 윈도우에서 DB 경로를 받아옴"""
         self.current_db_path = db_path
+        # DB 연결되면 바로 통계 갱신
+        self.update_statistics()
         print(f"스캐너 화면: DB 경로 설정됨 -> {db_path}")
 
     def get_rois(self):
-        """(임시) OMR 판독 좌표"""
+        """OMR 판독 좌표 (사용자님 지정 값 유지)"""
         w, h = 35, 35       
-        x_agree = 1130      
-        x_disagree = 1275   
-        start_y = 515       
-        gap_y = 90          
+        x_agree = 954       
+        x_disagree = 1103   
+        start_y = 771       
+        gap_y = 100         
 
         rois = []
         for i in range(5):
@@ -263,6 +276,8 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_close.clicked.connect(self.go_back_home)
         # 스캔 버튼 -> start_scan 실행
         self.control_panel.btn_scan.clicked.connect(self.start_scan)
+        # ★ "오류점검" 버튼 연결
+        self.control_panel.btn_check.clicked.connect(self.open_error_check)
 
     def go_back_home(self):
         self.closed_signal.emit()
@@ -270,21 +285,19 @@ class ScannerReadingView(QWidget):
     @pyqtSlot()
     def start_scan(self):
         """스캔 버튼 클릭 시"""
-        # DB 선택 여부 확인
         if self.current_db_path is None:
             QMessageBox.warning(self, "경고", "먼저 '파일 설정' 메뉴에서 사용할 DB 파일을 선택(열기)해주세요!")
             return
 
-        # 윈도우 핸들 가져오기 (TWAIN 통신용)
+        # [추가] 이번 스캔 세션(시험실)의 카운트 초기화
+        self.current_session_count = 0
+
         my_hwnd = int(self.winId())
-        
-        # 워커 스레드 생성 및 실행
         self.worker = ScanWorker(my_hwnd)
         self.worker.image_scanned.connect(self.on_image_received)
         self.worker.scan_finished.connect(self.on_finished)
         self.worker.error_occurred.connect(self.on_error)
         
-        # 버튼 잠금
         self.control_panel.btn_scan.setEnabled(False)
         self.control_panel.btn_scan.setText("스캔중...")
         
@@ -294,13 +307,21 @@ class ScannerReadingView(QWidget):
     def on_image_received(self, image_path):
         """★ 핵심: 이미지 스캔 직후 호출됨"""
         self.total_read += 1
+        self.current_session_count += 1  # [추가] 이번 시험실 매수 증가
         
-        # 1. OMR 엔진 판독
+        # 1. OMR 엔진 판독 (기준점 보정 포함)
         rois = self.get_rois() 
-        status, results, _ = self.engine.analyze_sheet(image_path, rois)
+        status, results, _ = self.engine.analyze_sheet(image_path, rois, self.ref_anchor)
         
-        # 2. 결과 문자열 생성 (예: "10100")
-        result_str = "".join(["1" if len(r['marked']) > 0 else "0" for r in results])
+        # 2. 결과 문자열 생성
+        result_str = ""
+        for r in results:
+            if len(r['marked']) == 0: val = "0"
+            elif len(r['marked']) > 1: val = "3" # 중복
+            elif 0 in r['marked']: val = "1"     # 찬성
+            elif 1 in r['marked']: val = "2"     # 반대
+            else: val = "0"
+            result_str += val
         
         # 3. DB 저장용 데이터 구성
         current_place = self.cb_place.currentText()
@@ -320,7 +341,7 @@ class ScannerReadingView(QWidget):
         if self.current_db_path:
             self.db.insert_scan_result(self.current_db_path, save_data)
         
-        # 5. UI 테이블 업데이트
+        # 5. UI 테이블 업데이트 (가운데 표)
         row_data = [
             str(self.total_read),   # 판독번호
             "OMR_V1",               # 용지코드
@@ -337,15 +358,109 @@ class ScannerReadingView(QWidget):
         # 6. 상단 카운터 업데이트
         self.lbl_total.setText(str(self.total_read))
         self.lbl_cur_cnt.setText(str(self.total_read))
-        self.summary_table.setItem(0, 2, self._item(str(self.total_read)))
+        # self.summary_table 업데이트는 완료 시점에 하므로 여기서는 뺌
         self.control_panel.txt_temp.setText(str(self.total_read))
         self.main_grid.scrollToBottom()
+        
+        # 7. DB 통계도 즉시 갱신
+        self.update_statistics()
+
+    # ---------------------------------------------------------
+    # [핵심] 오류 점검 및 수정 로직
+    # ---------------------------------------------------------
+    def open_error_check(self):
+        """오류(is_valid=0)인 항목을 찾아 팝업을 띄움"""
+        if not self.current_db_path: return
+
+        # 1. DB에서 모든 데이터 가져오기
+        all_rows = self.db.get_all_scans(self.current_db_path)
+        
+        # 2. 오류인 것만 찾기
+        error_row = None
+        for row in all_rows:
+            # row[7]이 is_valid (0이면 오류)
+            if row[7] == 0: 
+                error_row = row
+                break
+        
+        if not error_row:
+            QMessageBox.information(self, "알림", "점검할 오류 항목이 없습니다!")
+            return
+
+        # 3. 팝업 데이터 준비 (문자열 '103' -> 리스트 변환)
+        result_str = error_row[6]
+        scan_results = []
+        for i, char in enumerate(result_str):
+            marked = []
+            if char == '1': marked = [0]
+            elif char == '2': marked = [1]
+            elif char == '3': marked = [0, 1]
+            
+            status = "정상"
+            if char == '0': status = "공란"
+            elif char == '3': status = "중복"
+            
+            scan_results.append({'q_num': i+1, 'marked': marked, 'status': status})
+
+        # 4. 이미지 로드
+        import cv2
+        import numpy as np
+        try:
+            img_array = np.fromfile(error_row[4], np.uint8) 
+            image_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        except:
+            image_cv = None
+
+        # 5. 팝업 실행
+        dlg = ErrorCorrectionDialog(self, image_cv, scan_results, error_row[4])
+        if dlg.exec_():
+            # [저장 버튼 누름] -> 수정된 데이터 DB 업데이트
+            new_result_str = ""
+            for r in dlg.scan_results:
+                if len(r['marked']) == 0: val = "0"
+                elif len(r['marked']) > 1: val = "3"
+                elif 0 in r['marked']: val = "1"
+                elif 1 in r['marked']: val = "2"
+                new_result_str += val
+            
+            read_num = error_row[1]
+            self.db.update_scan_result(self.current_db_path, read_num, new_result_str, 1) # 강제 유효(1)
+            
+            self.update_statistics()
+            QMessageBox.information(self, "완료", f"{read_num}번 자료가 수정되었습니다.")
+
+    def update_statistics(self):
+        """DB 통계(총매수, 오류매수) 갱신"""
+        if not self.current_db_path: return
+        total, normal, error = self.db.get_statistics(self.current_db_path)
+        
+        self.lbl_total.setText(str(total))
+        self.lbl_check.setText(str(error)) 
+        self.control_panel.txt_temp.setText(str(total))
 
     @pyqtSlot()
     def on_finished(self):
-        QMessageBox.information(self, "완료", "스캔 작업이 완료되었습니다.")
-        self.reset_ui_state()
+        # [기존 기능] 왼쪽 요약 테이블 추가
+        place = self.cb_place.currentText()
+        room = self.cb_room.currentText()
+        count = str(self.current_session_count)
+        
+        row = self.summary_table.rowCount()
+        self.summary_table.insertRow(row)
+        self.summary_table.setItem(row, 0, self._item(place))
+        self.summary_table.setItem(row, 1, self._item(room))
+        self.summary_table.setItem(row, 2, self._item(count))
+        
+        # [수정] 시험실 번호 자동 증가 (콤보박스 인덱스 변경)
+        current_idx = self.cb_room.currentIndex()
+        # 다음 번호가 있으면(마지막 번호가 아니면) 하나 올림
+        if current_idx < self.cb_room.count() - 1:
+            self.cb_room.setCurrentIndex(current_idx + 1)
+            # 상단 파란색 라벨도 갱신
+            self.lbl_cur_room.setText(self.cb_room.currentText())
 
+        QMessageBox.information(self, "완료", f"{place} - {room} 시험실 스캔 완료\n(총 {count}매)")
+        self.reset_ui_state()
     @pyqtSlot(str)
     def on_error(self, msg):
         QMessageBox.warning(self, "오류", msg)
