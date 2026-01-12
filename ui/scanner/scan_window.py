@@ -105,7 +105,7 @@ class ScannerReadingView(QWidget):
         top_layout.setContentsMargins(5, 5, 5, 5)
         top_layout.setSpacing(10)
 
-        # (1-1) 좌측: 판독/점검 카운터 그룹
+        # (1-1) 좌측: 카운터 그룹
         grp_cnt = QGroupBox()
         grp_cnt.setStyleSheet("background-color: white; border: 1px solid #999; border-radius: 3px;")
         grid_cnt = QGridLayout(grp_cnt)
@@ -125,17 +125,18 @@ class ScannerReadingView(QWidget):
         self.lbl_check = QLabel("0", styleSheet=st_red_num)
         grid_cnt.addWidget(self.lbl_check, 1, 1, alignment=Qt.AlignCenter)
 
-        # 구분선
         line = QFrame(); line.setFrameShape(QFrame.HLine); line.setStyleSheet("color: #ccc;")
         grid_cnt.addWidget(line, 2, 0, 1, 2)
 
-        # 현재 고사장/시험실 정보
+        # [수정] 현재 고사장/시험실 라벨 변수화
         lbl_cur_title = QLabel("현재 고사장/시험실 판독매수", styleSheet="font-size:10px; font-weight:bold; color:#555; border:none;")
         grid_cnt.addWidget(lbl_cur_title, 3, 0, 1, 2)
 
         sub_layout = QGridLayout()
         sub_layout.addWidget(QLabel("현재 고사장 :", styleSheet="font-size:11px; border:none;"), 0, 0)
-        sub_layout.addWidget(QLabel("스캐너1", styleSheet="color:blue; font-weight:bold; border:none;"), 0, 1)
+        # ★ 여기를 변수(self.lbl_cur_place)로 변경
+        self.lbl_cur_place = QLabel("스캐너1", styleSheet="color:blue; font-weight:bold; border:none;")
+        sub_layout.addWidget(self.lbl_cur_place, 0, 1)
         
         sub_layout.addWidget(QLabel("현재 시험실 :", styleSheet="font-size:11px; border:none;"), 1, 0)
         self.lbl_cur_room = QLabel("1", styleSheet="color:blue; font-weight:bold; font-size:14px; border:none;")
@@ -147,7 +148,7 @@ class ScannerReadingView(QWidget):
 
         grid_cnt.addLayout(sub_layout, 4, 0, 1, 2)
 
-        # (1-2) 중앙: 설정 (양식, 고사장)
+        # (1-2) 중앙: 설정
         grp_set = QGroupBox()
         grp_set.setStyleSheet("background-color: white; border: 1px solid #999; border-radius: 3px;")
         grid_set = QGridLayout(grp_set)
@@ -157,12 +158,12 @@ class ScannerReadingView(QWidget):
         
         self.cb_form = QComboBox(); self.cb_form.addItem("OMR_Project"); self.cb_form.setStyleSheet(st_combo)
         
-        # [수정] 스캐너 1~10 추가
+        # [수정] 스캐너 1~10 목록 채우기
         self.cb_place = QComboBox(); self.cb_place.setStyleSheet(st_combo)
         for i in range(1, 11):
             self.cb_place.addItem(f"스캐너{i}")
-            
-        # [수정] 시험실 1~999 추가 (넉넉하게)
+
+        # [수정] 시험실 1~100 목록 채우기
         self.cb_room = QComboBox(); self.cb_room.setStyleSheet(st_combo)
         for i in range(1, 1000):
             self.cb_room.addItem(str(i))
@@ -173,65 +174,52 @@ class ScannerReadingView(QWidget):
         grid_set.addWidget(self.cb_place, 1, 1)
         grid_set.addWidget(QLabel("판독 시험실 :", styleSheet="font-weight:bold; border:none;"), 2, 0)
         grid_set.addWidget(self.cb_room, 2, 1)
-        # (1-3) 우측: 오류점검 설정
+
+        # (1-3) 우측: 오류점검 (기존 유지)
         grp_err = QGroupBox("오류점검")
         grp_err.setStyleSheet("background-color: white; border: 1px solid #999; font-size: 11px;")
         grid_err = QGridLayout(grp_err)
-        
         self.cb_err_opt = QComboBox(); self.cb_err_opt.addItem("이미지오류(저장안함) 스캔시보기 / 표기오류 스캔완료후보기")
         self.cb_stop_opt = QComboBox(); self.cb_stop_opt.addItem("모든오류 스캔중단")
-        
         grid_err.addWidget(QLabel("스캔시 오류점검창 보기 :", styleSheet="border:none;"), 0, 0)
         grid_err.addWidget(self.cb_err_opt, 0, 1)
         grid_err.addWidget(QLabel("오류점검시 스캔중단 :", styleSheet="border:none;"), 1, 0)
         grid_err.addWidget(self.cb_stop_opt, 1, 1)
 
-        # (1-4) 우측 끝: 체크박스
+        # (1-4) 우측 끝: 체크박스 (기존 유지)
         grp_chk = QGroupBox("오류점검")
         grp_chk.setStyleSheet("background-color: white; border: 1px solid #999; font-size: 11px;")
         v_chk = QVBoxLayout(grp_chk)
         v_chk.addWidget(QLabel("☑ 전체공란 무효표 점검"))
         v_chk.addWidget(QLabel("☑ 기타 무효표 점검"))
 
-        # 레이아웃 비율 설정
         top_layout.addWidget(grp_cnt, 25)
         top_layout.addWidget(grp_set, 30)
         top_layout.addWidget(grp_err, 35)
         top_layout.addWidget(grp_chk, 10)
-
         main_layout.addWidget(top_frame)
 
-        # === 2. 하단 3단 분리 (좌측 표 | 중앙 표 | 우측 컨트롤) ===
+        # === 2. 하단 3단 분리 (기존 유지) ===
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(5)
         splitter.setStyleSheet("QSplitter::handle { background-color: #ccc; }")
 
-        # (2-1) 좌측: 요약 테이블
         self.summary_table = QTableWidget()
         self.summary_table.setColumnCount(3)
         self.summary_table.setHorizontalHeaderLabels(["판독고사장", "판독시험실", "판독매수"])
         self.summary_table.verticalHeader().setVisible(False)
-        self.summary_table.setStyleSheet("""
-            QHeaderView::section { background-color: #D1E8FF; border: 1px solid #999; font-weight: bold; font-size: 11px; }
-            QTableWidget { gridline-color: #ccc; font-size: 11px; }
-        """)
-        # 초기 행 추가
+        self.summary_table.setStyleSheet("QHeaderView::section { background-color: #D1E8FF; border: 1px solid #999; font-weight: bold; font-size: 11px; } QTableWidget { gridline-color: #ccc; font-size: 11px; }")
         self.summary_table.insertRow(0)
         self.summary_table.setItem(0, 0, self._item("스캐너1"))
         self.summary_table.setItem(0, 1, self._item("1"))
         self.summary_table.setItem(0, 2, self._item("0"))
 
-        # (2-2) 중앙: 메인 데이터 그리드 (DataGrid 부품 사용)
         self.main_grid = DataGrid()
-
-        # (2-3) 우측: 컨트롤 패널 (ControlPanel 부품 사용)
         self.control_panel = ControlPanel()
 
         splitter.addWidget(self.summary_table)
         splitter.addWidget(self.main_grid)
         splitter.addWidget(self.control_panel)
-
-        # 초기 너비 비율
         splitter.setSizes([200, 1200, 260])
         splitter.setCollapsible(2, False)
 
@@ -272,12 +260,14 @@ class ScannerReadingView(QWidget):
     # [3] 이벤트 연결 및 핸들러 (버튼 동작)
     # -------------------------------------------------------------------------
     def connect_signals(self):
-        # 닫기 버튼 -> 홈으로 복귀
+        # 기존 버튼 연결
         self.control_panel.btn_close.clicked.connect(self.go_back_home)
-        # 스캔 버튼 -> start_scan 실행
         self.control_panel.btn_scan.clicked.connect(self.start_scan)
-        # ★ "오류점검" 버튼 연결
         self.control_panel.btn_check.clicked.connect(self.open_error_check)
+        
+        # [추가] 콤보박스 변경 시 상단 라벨 자동 업데이트
+        self.cb_place.currentTextChanged.connect(self.lbl_cur_place.setText)
+        self.cb_room.currentTextChanged.connect(self.lbl_cur_room.setText)
 
     def go_back_home(self):
         self.closed_signal.emit()
