@@ -5,7 +5,7 @@ import os
 class OMREngine:
     def __init__(self):
         self.threshold_value = 140  # 흑/백 마킹 구분 기준
-        self.pixel_threshold = 0.02 # 칸의 2% 이상 채워지면 마킹으로 인정
+        self.pixel_threshold = 0.05 # 칸의 2% 이상 채워지면 마킹으로 인정
         
         # [중요] 변환될 표준 이미지 크기 (A4 비율 기준 고해상도)
         # 이 크기로 이미지를 '강제 정렬' 시킵니다.
@@ -13,6 +13,12 @@ class OMREngine:
         # (스캐너가 보통 width=1600~2400 정도 나옵니다. 적절히 고정합니다.)
         self.width = 1654 
         self.height = 2339 
+
+    def configure(self, threshold, pixel_ratio):
+        """외부(DB)에서 설정을 받아와 적용하는 함수"""
+        self.threshold_value = int(threshold)
+        self.pixel_threshold = float(pixel_ratio)
+        # print(f"설정 적용됨: 임계값={self.threshold_value}, 비율={self.pixel_threshold}")
 
     def load_image(self, image_path):
         """이미지 로드 (한글 경로 대응 + 컬러로 읽기)"""
@@ -86,7 +92,7 @@ class OMREngine:
             # 못 찾았으면 원본 그대로 반환 (배경이 너무 밝거나 종이가 안 보임)
             return cv2.resize(img, (self.width, self.height))
 
-    def analyze_sheet(self, image_path, questions_rois):
+    def analyze_sheet(self, image_path, questions_rois, ref_anchor=None):
         """
         이미지를 불러와 정렬하고 -> 마킹을 판독하여 -> 결과를 반환
         """

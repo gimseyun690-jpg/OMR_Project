@@ -1,106 +1,183 @@
-from PyQt5.QtWidgets import (QMainWindow, QToolBar, QAction, QMessageBox, QLabel, 
-                             QStatusBar, QStackedWidget, QWidget, QVBoxLayout)
+import sys
+import os
+from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QAction, 
+                             QStatusBar, QToolBar, QStackedWidget, QMessageBox, QLabel)
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QIcon
+
+# 1. 기존 화면 및 설정
 from ui.settings.file_setting import FileSettingsDialog
-# ★ 이름이 바뀐 뷰(View) import
 from ui.scanner.scan_window import ScannerReadingView
+
+# 2. 결과 화면들
+from ui.results.vote_count import VoteCountView
+from ui.results.scan_data import ScanDataView
+from ui.results.scan_stats import ScanStatsView
+
+# ★ 3. [추가] 상세 설정 창들 Import
+from ui.settings.form_setting import FormSettingsDialog
+from ui.settings.mark_setting import MarkSettingsDialog
+from ui.settings.path_setting import PathSettingsDialog
+from ui.settings.site_setting import SiteSettingsDialog
 
 class OMRScannerApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("김세윤의 omr_project")
-        self.resize(1200, 800) # 기본 크기 설정
-        
-        # ★ 화면을 겹쳐놓는 스택 위젯 생성 (화면 전환용)
-        self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack) 
-
-        # UI 초기화
+        self.setWindowTitle("김세윤omr_project")
+        self.resize(1200, 800)
         self.init_ui()
 
     def init_ui(self):
         # ---------------------------------------------------------
-        # 1. 상단 툴바 생성 (사용자님 디자인 유지)
+        # ★ 0. 상단 메뉴바 (MenuBar) - 설정 메뉴 추가
         # ---------------------------------------------------------
-        toolbar = QToolBar("Main Toolbar")
+        menubar = self.menuBar()
+        
+        # [환경설정] 메뉴
+        menu_settings = menubar.addMenu('환경설정(S)')
+        
+        act_form = QAction('양식/좌표 설정', self)
+        act_form.triggered.connect(self.open_form_setting)
+        menu_settings.addAction(act_form)
+
+        act_mark = QAction('기표 인식 설정', self)
+        act_mark.triggered.connect(self.open_mark_setting)
+        menu_settings.addAction(act_mark)
+
+        act_path = QAction('저장 경로 설정', self)
+        act_path.triggered.connect(self.open_path_setting)
+        menu_settings.addAction(act_path)
+        
+        menu_settings.addSeparator() # 구분선
+
+        act_site = QAction('고사장/시험실 설정', self)
+        act_site.triggered.connect(self.open_site_setting)
+        menu_settings.addAction(act_site)
+
+        # ---------------------------------------------------------
+        # 1. 툴바 (메뉴 버튼들)
+        # ---------------------------------------------------------
+        toolbar = QToolBar("메인 툴바")
         toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonTextUnderIcon) # 아이콘 아래 텍스트
         self.addToolBar(toolbar)
 
-        # 2. 툴바 메뉴 목록
-        menu_items = [
-            "파일설정", "스캐너설정", "양식설정", "기표수설정", "경로설정", 
-            "고사장설정", "스캐너판독", "개표결과", "판독자료", "판독매수", "작업종료"
+        menus = [
+            ("파일설정", "folder.png"),
+            ("스캐너판독", "scanner.png"),
+            ("개표결과", "vote.png"),
+            ("판독자료", "excel.png"),
+            ("판독매수", "chart.png"),
+            ("작업종료", "exit.png")
         ]
 
-        # 3. 버튼 생성 및 툴바에 추가
-        for item in menu_items:
-            action = QAction(f"📂\n{item}", self) # 임시 아이콘
-            # 버튼 클릭 시 on_menu_click 함수로 연결
-            action.triggered.connect(lambda checked, x=item: self.on_menu_click(x))
+        for name, icon_file in menus:
+            action = QAction(name, self)
+            action.setStatusTip(f"{name} 화면으로 이동합니다.")
+            action.triggered.connect(lambda checked, n=name: self.on_menu_click(n))
             toolbar.addAction(action)
-            toolbar.addSeparator()
 
         # ---------------------------------------------------------
-        # 4. 화면 스택 구성 (홈 화면 + 스캐너 화면)
+        # 2. 메인 화면 영역 (스택 위젯)
         # ---------------------------------------------------------
+        self.stack = QStackedWidget()
         
-        # [페이지 0] 홈 화면 (기본 대기 화면 - 회색 배경)
-        self.home_widget = QWidget()
-        self.home_widget.setStyleSheet("background-color: #A0A0A0;")
-        # (원하시면 여기에 배경 로고 등을 넣을 수 있습니다)
+        # (0) 홈
+        self.home_widget = QLabel("상단 메뉴를 선택하여 작업을 시작하세요.")
+        self.home_widget.setAlignment(Qt.AlignCenter)
+        self.home_widget.setStyleSheet("font-size: 20px; color: #555;")
         
-        # [페이지 1] 스캐너 판독 화면
+        # (1) 스캐너
         self.scanner_view = ScannerReadingView()
-        # 스캐너 화면에서 '닫기' 버튼 누르면 -> 홈 화면(0번)으로 돌아오게 연결
-        self.scanner_view.closed_signal.connect(self.show_home)
+        self.scanner_view.closed_signal.connect(lambda: self.stack.setCurrentIndex(0))
 
-        # 스택에 추가
-        self.stack.addWidget(self.home_widget)   # 인덱스 0
-        self.stack.addWidget(self.scanner_view)  # 인덱스 1
+        # (2) 결과 화면들
+        self.vote_view = VoteCountView()
+        self.data_view = ScanDataView()
+        self.stats_view = ScanStatsView()
+
+        self.stack.addWidget(self.home_widget)   # 0
+        self.stack.addWidget(self.scanner_view)  # 1
+        self.stack.addWidget(self.vote_view)     # 2
+        self.stack.addWidget(self.data_view)     # 3
+        self.stack.addWidget(self.stats_view)    # 4
+
+        self.setCentralWidget(self.stack)
 
         # ---------------------------------------------------------
-        # 5. 상태바
+        # 3. 상태바
         # ---------------------------------------------------------
         self.statusbar = QStatusBar()
         self.setStatusBar(self.statusbar)
-        self.statusbar.showMessage("시스템 준비 완료")
+        self.statusbar.showMessage("준비")
 
+    # =============================================================
+    # [메뉴 동작 처리]
+    # =============================================================
     def on_menu_click(self, menu_name):
-        """툴바 버튼 클릭 처리"""
-        print(f"클릭된 메뉴: {menu_name}")
+        current_db = getattr(self.scanner_view, 'current_db_path', None)
         
         if menu_name == "작업종료":
             self.close()
 
         elif menu_name == "파일설정":
-            # 파일 설정은 팝업창으로 띄움 (Dialog)
             dlg = FileSettingsDialog(self)
             dlg.db_selected_signal.connect(self.on_db_changed)
-            dlg.exec_() # 팝업 실행
+            dlg.exec_()
 
         elif menu_name == "스캐너판독":
-            # ★ 핵심: 팝업(exec_) 대신 화면 전환(setCurrentIndex) 사용
-            self.stack.setCurrentIndex(1) 
-            self.statusbar.showMessage("스캐너 판독 화면으로 전환되었습니다.")
+            self.stack.setCurrentIndex(1)
+            self.statusbar.showMessage("스캐너 판독 화면")
+
+        elif menu_name == "개표결과":
+            self.vote_view.set_db_path(current_db) 
+            self.stack.setCurrentIndex(2)
+            self.statusbar.showMessage("개표 결과 집계")
+
+        elif menu_name == "판독자료":
+            self.data_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(3)
+            self.statusbar.showMessage("전체 판독 자료 조회")
+
+        elif menu_name == "판독매수":
+            self.stats_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(4)
+            self.statusbar.showMessage("고사장별 판독 매수 통계")
 
         else:
-            # 다른 버튼 누르면 일단 홈으로 복귀 (나중에 기능 연결)
             self.stack.setCurrentIndex(0)
-            self.statusbar.showMessage(f"'{menu_name}' 버튼이 클릭되었습니다.")
-
-    def show_home(self):
-        """홈 화면으로 돌아오기"""
-        self.stack.setCurrentIndex(0)
-        self.statusbar.showMessage("메인 화면으로 복귀했습니다.")
-
-# ui/main_window.py 파일 안의 on_db_changed 함수 수정
 
     def on_db_changed(self, path, title):
         self.setWindowTitle(f"김세윤omr_project - [{title}]")
         self.statusbar.showMessage(f"현재 열린 DB: {path}")
-        
-        # [추가됨] 스캐너 화면에 "이제 이 DB를 써!" 라고 알려주는 코드
-        # (scanner_view 안에 set_current_db 함수를 곧 만들 거예요)
-        if hasattr(self.scanner_view, 'set_current_db'):
-            self.scanner_view.set_current_db(path)
+        self.scanner_view.set_current_db(path)
+
+    # =============================================================
+    # ★ [추가] 설정창 열기 함수들
+    # =============================================================
+    def get_current_db(self):
+        """현재 열려있는 DB 경로 반환 (없으면 경고)"""
+        db_path = getattr(self.scanner_view, 'current_db_path', None)
+        if not db_path:
+            QMessageBox.warning(self, "경고", "먼저 DB파일을 선택(파일설정)해주세요.")
+            return None
+        return db_path
+
+    def open_form_setting(self):
+        db_path = self.get_current_db()
+        if db_path:
+            FormSettingsDialog(self, db_path).exec_()
+
+    def open_mark_setting(self):
+        db_path = self.get_current_db()
+        if db_path:
+            MarkSettingsDialog(self, db_path).exec_()
+
+    def open_path_setting(self):
+        db_path = self.get_current_db()
+        if db_path:
+            PathSettingsDialog(self, db_path).exec_()
+
+    def open_site_setting(self):
+        db_path = self.get_current_db()
+        if db_path:
+            SiteSettingsDialog(self, db_path).exec_()

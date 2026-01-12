@@ -164,3 +164,25 @@ class DBManager:
         rows = cursor.fetchall()
         conn.close()
         return rows
+    
+    def get_setting(self, db_path, key, default_value=""):
+        """설정값 불러오기"""
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM tblSettings WHERE key=?", (key,))
+            row = cursor.fetchone()
+            conn.close()
+            return row[0] if row else default_value
+        except:
+            return default_value
+
+    def save_setting(self, db_path, key, value):
+        """설정값 저장하기 (없으면 생성, 있으면 수정)"""
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        # UPSERT 방식 (SQLite 지원 버전에 따라 다를 수 있어 삭제 후 삽입 방식 사용)
+        cursor.execute("DELETE FROM tblSettings WHERE key=?", (key,))
+        cursor.execute("INSERT INTO tblSettings (key, value) VALUES (?, ?)", (key, str(value)))
+        conn.commit()
+        conn.close()

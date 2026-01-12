@@ -22,9 +22,11 @@ class ScanWorker(QThread):
     scan_finished = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, hwnd): 
+    # __init__에서 save_folder 인자 추가
+    def __init__(self, hwnd, save_folder): 
         super().__init__()
         self.hwnd = hwnd
+        self.save_folder = save_folder # 경로 저장
         self.scanner = ScannerDevice()
         self.is_running = True
 
@@ -47,8 +49,8 @@ class ScanWorker(QThread):
                 self.error_occurred.emit("급지대에 용지가 없습니다.")
                 return
 
-            # 4. 스캔 루프
-            for image_path in self.scanner.scan():
+            # 4. scan 함수에 save_folder 전달
+            for image_path in self.scanner.scan(self.save_folder):
                 if not self.is_running: break
                 self.image_scanned.emit(image_path)
             
@@ -242,14 +244,38 @@ class ScannerReadingView(QWidget):
         self.update_statistics()
         print(f"스캐너 화면: DB 경로 설정됨 -> {db_path}")
 
+    # 1. 좌표 가져오는 함수 (DB 연동 버전으로 교체)
     def get_rois(self):
-        """OMR 판독 좌표 (사용자님 지정 값 유지)"""
-        w, h = 35, 35       
-        x_agree = 954       
-        x_disagree = 1103   
-        start_y = 771       
-        gap_y = 100         
+        """DB에서 좌표 설정을 불러와 ROIs 생성"""
+        if not self.current_db_path:
+            # DB가 없으면 기본값 반환
+            return self.get_default_rois()
 
+        try:
+            # (1) DB에서 값 불러오기 (값이 없으면 기본값 사용)
+            start_y = int(self.db.get_setting(self.current_db_path, "roi_start_y", "515"))
+            gap_y = int(self.db.get_setting(self.current_db_path, "roi_gap_y", "90"))
+            w = int(self.db.get_setting(self.current_db_path, "roi_w", "35"))
+            h = int(self.db.get_setting(self.current_db_path, "roi_h", "35"))
+            x_agree = int(self.db.get_setting(self.current_db_path, "roi_agree_x", "1130"))
+            x_disagree = int(self.db.get_setting(self.current_db_path, "roi_disagree_x", "1275"))
+            
+            # (2) 좌표 리스트 생성
+            rois = []
+            for i in range(5):
+                y = start_y + (i * gap_y)
+                rois.append([(x_agree, y, w, h), (x_disagree, y, w, h)])
+            return rois
+            
+        except Exception as e:
+            print(f"좌표 로드 오류: {e}")
+            return self.get_default_rois()
+
+    def get_default_rois(self):
+        """안전장치: 기본 좌표"""
+        w, h = 35, 35
+        x_agree = 1130; x_disagree = 1275
+        start_y = 515; gap_y = 90
         rois = []
         for i in range(5):
             y = start_y + (i * gap_y)
@@ -278,30 +304,61 @@ class ScannerReadingView(QWidget):
         if self.current_db_path is None:
             QMessageBox.warning(self, "경고", "먼저 '파일 설정' 메뉴에서 사용할 DB 파일을 선택(열기)해주세요!")
             return
+        # [추가] DB에서 저장 경로 불러오기
+        default_path = os.path.abspath(os.path.join("data", "scan_images"))
+        save_folder = default_path
+        # DB 연결되어 있으면 설정값 가져옴, 없으면 기본값
+        if self.current_db_path:
+            save_folder = self.db.get_setting(self.current_db_path, "image_save_path", default_path)
+            
+        # 폴더가 없으면 생성
+        if not os.path.exists(save_folder):
+            try:
+                os.makedirs(save_folder)
+            except Exception as e:
+                QMessageBox.critical(self, "오류", f"폴더 생성 실패: {e}")
+                return
 
         # [추가] 이번 스캔 세션(시험실)의 카운트 초기화
         self.current_session_count = 0
 
         my_hwnd = int(self.winId())
-        self.worker = ScanWorker(my_hwnd)
+        # [수정] 워커 생성 시 save_folder 전달
+        self.worker = ScanWorker(my_hwnd, save_folder)
+        
         self.worker.image_scanned.connect(self.on_image_received)
         self.worker.scan_finished.connect(self.on_finished)
         self.worker.error_occurred.connect(self.on_error)
         
         self.control_panel.btn_scan.setEnabled(False)
         self.control_panel.btn_scan.setText("스캔중...")
-        
         self.worker.start()
 
     @pyqtSlot(str)
     def on_image_received(self, image_path):
-        """★ 핵심: 이미지 스캔 직후 호출됨"""
         self.total_read += 1
-        self.current_session_count += 1  # [추가] 이번 시험실 매수 증가
+        self.current_session_count += 1
         
-        # 1. OMR 엔진 판독 (기준점 보정 포함)
-        rois = self.get_rois() 
-        status, results, _ = self.engine.analyze_sheet(image_path, rois, self.ref_anchor)
+        # [연동 핵심 1] DB에서 기준점(Anchor) 불러오기
+        ref_x = 100
+        ref_y = 500
+        if self.current_db_path:
+            ref_x = int(self.db.get_setting(self.current_db_path, "ref_x", "100"))
+            ref_y = int(self.db.get_setting(self.current_db_path, "ref_y", "500"))
+        
+        current_anchor = (ref_x, ref_y)
+
+        # [연동 핵심 2] DB에서 인식 민감도(Threshold) 불러와 엔진에 적용
+        if self.current_db_path:
+            thresh = self.db.get_setting(self.current_db_path, "omr_threshold", "140")
+            ratio = self.db.get_setting(self.current_db_path, "omr_pixel_ratio", "0.25")
+            self.engine.configure(thresh, ratio)
+
+        # [연동 핵심 3] DB 좌표로 생성된 ROIs 가져오기
+        rois = self.get_rois()
+        
+        # 엔진 실행
+        status, results, _ = self.engine.analyze_sheet(image_path, rois, current_anchor)
         
         # 2. 결과 문자열 생성
         result_str = ""
