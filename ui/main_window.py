@@ -181,3 +181,10 @@ class OMRScannerApp(QMainWindow):
         db_path = self.get_current_db()
         if db_path:
             SiteSettingsDialog(self, db_path).exec_()
+
+    def on_db_changed(self, path, title):
+        self.setWindowTitle(f"김세윤omr_project - [{title}]")
+        self.statusbar.showMessage(f"현재 열린 DB: {path}")
+
+        # ✅ 추가: 스캐너 화면에 현재 프로젝트 DB 경로 전달
+        self.scanner_view.set_project_db(path)

@@ -13,6 +13,8 @@ from logic.scanner_core import ScannerDevice
 from logic.omr_engine import OMREngine
 from database import DBManager
 from ui.scanner.popups.error_editor import ErrorCorrectionDialog # 팝업창
+from logic.pipeline import ScanPipeline
+
 
 # =========================================================
 # [스캔 워커 스레드] - 백그라운드에서 스캐너 돌리기 (유지)
@@ -29,6 +31,8 @@ class ScanWorker(QThread):
         self.save_folder = save_folder # 경로 저장
         self.scanner = ScannerDevice()
         self.is_running = True
+        self.pipeline = ScanPipeline()
+
 
     def run(self):
         try:
@@ -241,6 +245,7 @@ class ScannerReadingView(QWidget):
         """메인 윈도우에서 DB 경로를 받아옴"""
         self.current_db_path = db_path
         # DB 연결되면 바로 통계 갱신
+        self.pipeline.set_project(db_path)
         self.update_statistics()
         print(f"스캐너 화면: DB 경로 설정됨 -> {db_path}")
 
@@ -336,81 +341,29 @@ class ScannerReadingView(QWidget):
 
     @pyqtSlot(str)
     def on_image_received(self, image_path):
-        self.total_read += 1
-        self.current_session_count += 1
-        
-        # [연동 핵심 1] DB에서 기준점(Anchor) 불러오기
-        ref_x = 100
-        ref_y = 500
-        if self.current_db_path:
-            ref_x = int(self.db.get_setting(self.current_db_path, "ref_x", "100"))
-            ref_y = int(self.db.get_setting(self.current_db_path, "ref_y", "500"))
-        
-        current_anchor = (ref_x, ref_y)
+     self.total_read += 1
+     self.current_session_count += 1
 
-        # [연동 핵심 2] DB에서 인식 민감도(Threshold) 불러와 엔진에 적용
-        if self.current_db_path:
-            thresh = self.db.get_setting(self.current_db_path, "omr_threshold", "140")
-            ratio = self.db.get_setting(self.current_db_path, "omr_pixel_ratio", "0.25")
-            self.engine.configure(thresh, ratio)
+     current_place = self.cb_place.currentText()
+     current_room = self.cb_room.currentText()
 
-        # [연동 핵심 3] DB 좌표로 생성된 ROIs 가져오기
-        rois = self.get_rois()
-        
-        # 엔진 실행
-        status, results, _ = self.engine.analyze_sheet(image_path, rois, current_anchor)
-        
-        # 2. 결과 문자열 생성
-        result_str = ""
-        for r in results:
-            if len(r['marked']) == 0: val = "0"
-            elif len(r['marked']) > 1: val = "3" # 중복
-            elif 0 in r['marked']: val = "1"     # 찬성
-            elif 1 in r['marked']: val = "2"     # 반대
-            else: val = "0"
-            result_str += val
-        
-        # 3. DB 저장용 데이터 구성
-        current_place = self.cb_place.currentText()
-        current_room = self.cb_room.currentText()
-        
-        save_data = {
-            'read_num': self.total_read,
-            'place': current_place,
-            'room': current_room,
-            'path': image_path,
-            'sheet_code': 'OMR_V1',
-            'mark_result': result_str,
-            'is_valid': 1 if status == "정상" else 0
-        }
-        
-        # 4. DB 저장
-        if self.current_db_path:
-            self.db.insert_scan_result(self.current_db_path, save_data)
-        
-        # 5. UI 테이블 업데이트 (가운데 표)
-        row_data = [
-            str(self.total_read),   # 판독번호
-            "OMR_V1",               # 용지코드
-            current_place,          # 고사장
-            current_room,           # 시험실
-            status,                 # 표기오류
-            "완료",                 # 점검구분
-            result_str,             # 표기내용
-            image_path,             # 경로
-            os.path.basename(image_path) # 파일명
-        ]
-        self.main_grid.add_row_data(row_data)
-        
-        # 6. 상단 카운터 업데이트
-        self.lbl_total.setText(str(self.total_read))
-        self.lbl_cur_cnt.setText(str(self.total_read))
-        # self.summary_table 업데이트는 완료 시점에 하므로 여기서는 뺌
-        self.control_panel.txt_temp.setText(str(self.total_read))
-        self.main_grid.scrollToBottom()
-        
-        # 7. DB 통계도 즉시 갱신
-        self.update_statistics()
+     row_data = self.pipeline.process_image(
+         image_path=image_path,
+         read_num=self.total_read,
+         place=current_place,
+         room=current_room,
+     )
+
+     self.main_grid.add_row_data(row_data)
+
+     self.lbl_total.setText(str(self.total_read))
+     self.lbl_cur_cnt.setText(str(self.total_read))
+     self.control_panel.txt_temp.setText(str(self.total_read))
+     self.main_grid.scrollToBottom()
+
+     self.update_statistics()
+
+
 
     # ---------------------------------------------------------
     # [핵심] 오류 점검 및 수정 로직

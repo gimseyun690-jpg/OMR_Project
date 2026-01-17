@@ -29,7 +29,7 @@ def main():
     
     # 3. 전역 폰트 설정 (깔끔한 맑은 고딕)
     # 글씨가 너무 크면 10, 적당하면 11로 하세요
-    font = QFont("Malgun Gothic", 11) 
+    font = QFont("Malgun Gothic", 10) 
     app.setFont(font)
     
     # 4. 메인 윈도우 생성 및 표시
