@@ -1,0 +1,32 @@
+{
+  "form_id": "OMR_V1_vote",
+  "display_name": "OMR_V1 (선거/찬반 5문항)",
+  "sheet_code": "OMR_V1",
+  "questions": 5,
+  
+
+  "anchor": { "x": 100, "y": 500 },
+
+  "omr": {
+    "threshold": 140,
+    "pixel_ratio": 0.25
+  },
+
+  "roi": {
+    "start_y": 515,
+    "gap_y": 90,
+    "w": 35,
+    "h": 35,
+    "agree_x": 1130,
+    "disagree_x": 1275
+  },
+  
+  "timing_marks": [
+  { "name": "TL", "x": 100,  "y": 500,  "w": 80, "h": 80 },
+  { "name": "TR", "x": 1300, "y": 500,  "w": 80, "h": 80 },
+  { "name": "BL", "x": 100,  "y": 1600, "w": 80, "h": 80 },
+  { "name": "BR", "x": 1300, "y": 1600, "w": 80, "h": 80 }
+]
+
+
+}

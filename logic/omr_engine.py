@@ -94,75 +94,106 @@ class OMREngine:
 
     def analyze_sheet(self, image_path, questions_rois, ref_anchor=None):
         """
-        이미지를 불러와 정렬하고 -> 마킹을 판독하여 -> 결과를 반환
+        [호환용] path를 받아 이미지 로드 후 analyze_sheet_cv로 위임
         """
         original_img = self.load_image(image_path)
         if original_img is None:
             return "ERROR", [], None
 
-        # ★★★ 1. 자동 정렬 수행 (종이 펴기) ★★★
-        # aligned_img = self.align_image(original_img)
-        aligned_img = original_img
-        
-        # 2. 정렬된 이미지로 판독 준비 (컬러 -> 흑백 이진화)
-        img_gray = cv2.cvtColor(aligned_img, cv2.COLOR_BGR2GRAY)
-        _, binary_img = cv2.threshold(img_gray, self.threshold_value, 255, cv2.THRESH_BINARY_INV)
+        return self.analyze_sheet_cv(original_img, questions_rois, ref_anchor=ref_anchor)
 
-        # 결과 그리기용 이미지 (aligned_img 복사)
+    def analyze_sheet_cv(self, original_img, questions_rois, ref_anchor=None):
+        """
+        [신규] 이미 로드된 cv 이미지(ndarray)를 받아 판독
+        - pipeline에서 deskew/warp한 이미지를 그대로 넘길 수 있게 됨
+        """
+        if original_img is None:
+            return "ERROR", [], None
+
+        # 엔진 내부에서 이미지 크기 최신화 (중요)
+        self.height, self.width = original_img.shape[:2]
+
+        # 1) 정렬/워핑 단계 (지금은 pass, 나중에 align_image로 교체)
+        aligned_img = original_img
+
+        # 2) 그레이 + 이진화
+        img_gray = cv2.cvtColor(aligned_img, cv2.COLOR_BGR2GRAY)
+
+        # threshold_value가 고정값이면 기존처럼, 아니라면 OTSU 옵션도 가능
+        # 지금은 기존 로직 유지
+        _, binary_img = cv2.threshold(
+            img_gray, int(self.threshold_value), 255, cv2.THRESH_BINARY_INV
+        )
+
         debug_img = aligned_img.copy()
 
         sheet_results = []
         has_error = False
 
-        # 3. 좌표(ROI)에 따라 마킹 확인
+        # ROI 순회
         for q_idx, rois in enumerate(questions_rois):
             marked_indices = []
-            
+
             for r_idx, (x, y, w, h) in enumerate(rois):
-                # 좌표가 이미지 범위를 벗어나지 않게 방어 코드
-                if y+h > self.height or x+w > self.width:
+                # ROI가 이미지 밖이면 안전하게 스킵/클립
+                x = int(x); y = int(y); w = int(w); h = int(h)
+                if w <= 0 or h <= 0:
                     continue
 
-                # 마킹 영역 자르기
-                roi = binary_img[y:y+h, x:x+w]
-                
-                # 채워진 픽셀 수 세기
+                x0 = max(0, x)
+                y0 = max(0, y)
+                x1 = min(self.width, x + w)
+                y1 = min(self.height, y + h)
+
+                if x1 <= x0 or y1 <= y0:
+                    continue
+
+                roi = binary_img[y0:y1, x0:x1]
+
                 marked_pixels = cv2.countNonZero(roi)
-                fill_ratio = marked_pixels / (w * h)
-                
-                is_marked = fill_ratio > self.pixel_threshold
-                
-                # 시각화 (초록/빨강 박스)
+                area = (x1 - x0) * (y1 - y0)
+                fill_ratio = (marked_pixels / area) if area > 0 else 0.0
+
+                is_marked = fill_ratio > float(self.pixel_threshold)
+
+                # 시각화 (초록/빨강)
                 color = (0, 255, 0) if is_marked else (0, 0, 255)
-                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, 2)
-                
+                cv2.rectangle(debug_img, (x0, y0), (x1, y1), color, 2)
+
                 if is_marked:
                     marked_indices.append(r_idx)
 
-            # 판독 상태 결정 (정상/공란/중복)
-            status = "정상"
+            # 상태 결정
             if len(marked_indices) == 0:
                 status = "공란"
                 has_error = True
             elif len(marked_indices) > 1:
                 status = "중복"
                 has_error = True
-            
+            else:
+                status = "정상"
+
             sheet_results.append({
                 "q_num": q_idx + 1,
                 "marked": marked_indices,
                 "status": status
             })
 
-            # 오류 시 보라색 강조 박스
+            # 오류 강조(보라)
             if status != "정상" and rois:
-                x1 = min(r[0] for r in rois)
-                y1 = min(r[1] for r in rois)
-                x2 = max(r[0]+r[2] for r in rois)
-                y2 = max(r[1]+r[3] for r in rois)
-                cv2.rectangle(debug_img, (x1-5, y1-5), (x2+5, y2+5), (255, 0, 255), 3)
+                try:
+                    x1 = min(int(r[0]) for r in rois)
+                    y1 = min(int(r[1]) for r in rois)
+                    x2 = max(int(r[0] + r[2]) for r in rois)
+                    y2 = max(int(r[1] + r[3]) for r in rois)
+
+                    x1 = max(0, x1 - 5); y1 = max(0, y1 - 5)
+                    x2 = min(self.width - 1, x2 + 5)
+                    y2 = min(self.height - 1, y2 + 5)
+
+                    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 255), 3)
+                except Exception:
+                    pass
 
         final_status = "오류" if has_error else "정상"
-        
-        # 반환: (전체상태, 상세결과, 정렬되고_박스쳐진_이미지)
         return final_status, sheet_results, debug_img

@@ -98,6 +98,29 @@ class DBManager:
         cursor.execute(sql, (mark_result, is_valid, read_num))
         conn.commit()
         conn.close()
+        
+    def insert_manual_edit(self, db_path, read_num, image_path, before_result, after_result,
+                       editor=None, reason=None):
+        import sqlite3
+        import getpass
+        from datetime import datetime
+
+        if editor is None:
+            editor = getpass.getuser()
+
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO manual_edits
+            (read_num, image_path, before_result, after_result, editor, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (read_num, image_path, before_result, after_result, editor, reason, created_at))
+
+        conn.commit()
+        conn.close()
+
 
     def get_all_scans(self, db_path):
         """모든 스캔 데이터 가져오기"""

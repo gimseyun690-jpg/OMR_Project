@@ -1,8 +1,10 @@
 import os
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
                              QLabel, QFrame, QGroupBox, QComboBox, QSplitter,
-                             QTableWidget, QHeaderView, QAbstractItemView, QMessageBox, QTableWidgetItem)
+                             QTableWidget, QHeaderView, QAbstractItemView, QMessageBox, QTableWidgetItem
+                             , QFileDialog, QProgressDialog)
 from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QThread
+
 
 # 기존 UI 컴포넌트 import (유지)
 from ui.scanner.components.control_panel import ControlPanel
@@ -14,6 +16,7 @@ from logic.omr_engine import OMREngine
 from database import DBManager
 from ui.scanner.popups.error_editor import ErrorCorrectionDialog # 팝업창
 from logic.pipeline import ScanPipeline
+from logic.form_loader import list_forms, load_form, build_rois_from_form, get_anchor_from_form, get_omr_params, get_sheet_code
 
 
 # =========================================================
@@ -31,7 +34,6 @@ class ScanWorker(QThread):
         self.save_folder = save_folder # 경로 저장
         self.scanner = ScannerDevice()
         self.is_running = True
-        self.pipeline = ScanPipeline()
 
 
     def run(self):
@@ -67,6 +69,58 @@ class ScanWorker(QThread):
 
     def stop(self):
         self.is_running = False
+class DemoWorker(QThread):
+    progress = pyqtSignal(int, int, str)   # current, total, filename
+    result_row = pyqtSignal(list)          # row_data
+    finished = pyqtSignal(int, int)        # ok, fail
+    error = pyqtSignal(str)
+
+    def __init__(self, pipeline, files, place, room, start_read_num):
+        super().__init__()
+        self.pipeline = pipeline
+        self.files = files
+        self.place = place
+        self.room = room
+        self.start_read_num = start_read_num
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        ok = 0
+        fail = 0
+        total = len(self.files)
+
+        read_num = self.start_read_num
+
+        try:
+            for idx, path in enumerate(self.files, start=1):
+                if self._cancel:
+                    break
+
+                # 진행률 신호
+                self.progress.emit(idx, total, os.path.basename(path))
+
+                try:
+                    read_num += 1
+                    row_data = self.pipeline.process_image(
+                        image_path=path,
+                        read_num=read_num,
+                        place=self.place,
+                        room=self.room,
+                    )
+                    self.result_row.emit(row_data)
+                    ok += 1
+                except Exception as e:
+                    fail += 1
+                    # 데모는 실패해도 계속
+                    print(f"[DEMO] 실패: {path} -> {e}")
+
+            self.finished.emit(ok, fail)
+
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 # =========================================================
@@ -75,13 +129,19 @@ class ScanWorker(QThread):
 class ScannerReadingView(QWidget):
     closed_signal = pyqtSignal()
 
+    def set_project_db(self, db_path):
+         self.set_current_db(db_path)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        
+
+
         # 내부 변수 초기화
         self.total_read = 0
         self.worker = None
-        
+
+        self.pipeline = ScanPipeline()
+
         # ★ 엔진 & DB 매니저 생성
         self.engine = OMREngine()
         self.db = DBManager()
@@ -93,6 +153,7 @@ class ScannerReadingView(QWidget):
         # UI 초기화 (원래 디자인 함수 호출)
         self.init_ui()
         self.connect_signals()
+
 
     # -------------------------------------------------------------------------
     # [1] UI 디자인 (사용자님 원래 코드 100% 복구)
@@ -162,7 +223,16 @@ class ScannerReadingView(QWidget):
         st_blue_lbl = "color: blue; font-weight: bold; font-size: 12px; border: none;"
         st_combo = "QComboBox { border: 1px solid #999; padding: 2px; font-size: 12px; font-weight: bold; color: black; }"
         
-        self.cb_form = QComboBox(); self.cb_form.addItem("OMR_Project"); self.cb_form.setStyleSheet(st_combo)
+        self.cb_form = QComboBox()
+        self.cb_form.setStyleSheet(st_combo)
+
+        self._forms = list_forms()
+        if not self._forms:
+            self.cb_form.addItem("폼 없음 (resources/forms)", userData=None)
+        else:
+            for form_id, display, path in self._forms:
+                self.cb_form.addItem(display, userData=path)
+
         
         # [수정] 스캐너 1~10 목록 채우기
         self.cb_place = QComboBox(); self.cb_place.setStyleSheet(st_combo)
@@ -242,12 +312,14 @@ class ScannerReadingView(QWidget):
         return item
 
     def set_current_db(self, db_path):
-        """메인 윈도우에서 DB 경로를 받아옴"""
         self.current_db_path = db_path
-        # DB 연결되면 바로 통계 갱신
         self.pipeline.set_project(db_path)
-        self.update_statistics()
-        print(f"스캐너 화면: DB 경로 설정됨 -> {db_path}")
+
+        try:
+            self.update_statistics()
+        except Exception as e:
+            QMessageBox.critical(self, "DB 오류", f"통계 갱신 중 오류:\n{e}")
+
 
     # 1. 좌표 가져오는 함수 (DB 연동 버전으로 교체)
     def get_rois(self):
@@ -295,13 +367,117 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_close.clicked.connect(self.go_back_home)
         self.control_panel.btn_scan.clicked.connect(self.start_scan)
         self.control_panel.btn_check.clicked.connect(self.open_error_check)
+        self.control_panel.btn_demo.clicked.connect(self.run_demo_folder)
+
         
         # [추가] 콤보박스 변경 시 상단 라벨 자동 업데이트
         self.cb_place.currentTextChanged.connect(self.lbl_cur_place.setText)
         self.cb_room.currentTextChanged.connect(self.lbl_cur_room.setText)
 
+        self.cb_form.currentIndexChanged.connect(self.on_form_changed)
+        self.on_form_changed()  # 초기 1회 적용
+
+    def on_form_changed(self):
+        self.pipeline.set_form_path(self.cb_form.currentData())
+
+
     def go_back_home(self):
         self.closed_signal.emit()
+
+    def run_demo_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "테스트 이미지 폴더 선택")
+        if not folder:
+            return
+
+        exts = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+        files = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(exts)]
+        files.sort()
+
+        if not files:
+            QMessageBox.information(self, "알림", "선택한 폴더에 이미지가 없습니다.")
+            return
+
+        # UI 잠금
+        self.control_panel.btn_scan.setEnabled(False)
+        self.control_panel.btn_check.setEnabled(False)
+        self.control_panel.btn_demo.setEnabled(False)
+        self.control_panel.btn_demo.setText("데모 실행중...")
+
+        current_place = self.cb_place.currentText()
+        current_room = self.cb_room.currentText()
+
+        # 진행률 다이얼로그
+        self.demo_progress = QProgressDialog("데모 판독 준비중...", "취소", 0, len(files), self)
+        self.demo_progress.setWindowTitle("데모 진행률")
+        self.demo_progress.setWindowModality(Qt.WindowModal)
+        self.demo_progress.setAutoClose(False)
+        self.demo_progress.setAutoReset(False)
+        self.demo_progress.show()
+
+        # 워커 생성
+        start_read_num = self.total_read
+        self.demo_worker = DemoWorker(
+            pipeline=self.pipeline,
+            files=files,
+            place=current_place,
+            room=current_room,
+            start_read_num=start_read_num
+        )
+
+        # 연결
+        self.demo_progress.canceled.connect(self.demo_worker.cancel)
+        self.demo_worker.progress.connect(self._on_demo_progress)
+        self.demo_worker.result_row.connect(self._on_demo_row)
+        self.demo_worker.finished.connect(self._on_demo_finished)
+        self.demo_worker.error.connect(self._on_demo_error)
+
+        self.demo_worker.start()
+    
+    def _on_demo_progress(self, current, total, filename):
+        if hasattr(self, "demo_progress") and self.demo_progress:
+            self.demo_progress.setMaximum(total)
+            self.demo_progress.setValue(current)
+            self.demo_progress.setLabelText(f"데모 판독중... ({current}/{total})\n{filename}")
+
+    def _on_demo_row(self, row_data):
+        # UI에 결과 반영 (메인 스레드)
+        self.main_grid.add_row_data(row_data)
+        self.total_read = int(row_data[0])  # read_num 반영
+        self.lbl_total.setText(str(self.total_read))
+        self.lbl_cur_cnt.setText(str(self.total_read))
+        self.control_panel.txt_temp.setText(str(self.total_read))
+        self.main_grid.scrollToBottom()
+
+    def _on_demo_finished(self, ok, fail):
+        # UI 복원
+        if hasattr(self, "demo_progress") and self.demo_progress:
+            self.demo_progress.close()
+
+        self.control_panel.btn_scan.setEnabled(True)
+        self.control_panel.btn_check.setEnabled(True)
+        self.control_panel.btn_demo.setEnabled(True)
+        self.control_panel.btn_demo.setText("📂 테스트 이미지 불러오기")
+
+        try:
+            self.update_statistics()
+        except Exception:
+            pass
+
+        QMessageBox.information(self, "데모 완료", f"성공 {ok} / 실패 {fail}")
+
+    def _on_demo_error(self, msg):
+        if hasattr(self, "demo_progress") and self.demo_progress:
+            self.demo_progress.close()
+
+        self.control_panel.btn_scan.setEnabled(True)
+        self.control_panel.btn_check.setEnabled(True)
+        self.control_panel.btn_demo.setEnabled(True)
+        self.control_panel.btn_demo.setText("📂 테스트 이미지 불러오기")
+
+        QMessageBox.critical(self, "데모 오류", msg)
+
+
+
 
     @pyqtSlot()
     def start_scan(self):
@@ -362,7 +538,7 @@ class ScannerReadingView(QWidget):
      self.main_grid.scrollToBottom()
 
      self.update_statistics()
-
+    
 
 
     # ---------------------------------------------------------
@@ -424,6 +600,17 @@ class ScannerReadingView(QWidget):
                 new_result_str += val
             
             read_num = error_row[1]
+
+            before_result_str = error_row[6]
+            self.db.insert_manual_edit(
+                self.current_db_path,
+                read_num=read_num,
+                image_path=error_row[4],
+                before_result=before_result_str,
+                after_result=new_result_str,
+                reason="오류점검 팝업 수동 수정"
+            )
+
             self.db.update_scan_result(self.current_db_path, read_num, new_result_str, 1) # 강제 유효(1)
             
             self.update_statistics()

@@ -19,6 +19,8 @@ from ui.settings.form_setting import FormSettingsDialog
 from ui.settings.mark_setting import MarkSettingsDialog
 from ui.settings.path_setting import PathSettingsDialog
 from ui.settings.site_setting import SiteSettingsDialog
+from ui.settings.coord_calibrator import CoordCalibratorDialog
+
 
 class OMRScannerApp(QMainWindow):
     def __init__(self):
@@ -63,6 +65,7 @@ class OMRScannerApp(QMainWindow):
 
         menus = [
             ("파일설정", "folder.png"),
+            ("좌표설정", "coord_calibrator.png"),
             ("스캐너판독", "scanner.png"),
             ("개표결과", "vote.png"),
             ("판독자료", "excel.png"),
@@ -124,6 +127,10 @@ class OMRScannerApp(QMainWindow):
             dlg.db_selected_signal.connect(self.on_db_changed)
             dlg.exec_()
 
+        elif menu_name == "좌표설정":
+            self.open_coord_calibrator()
+            self.statusbar.showMessage("좌표 설정")
+
         elif menu_name == "스캐너판독":
             self.stack.setCurrentIndex(1)
             self.statusbar.showMessage("스캐너 판독 화면")
@@ -161,6 +168,11 @@ class OMRScannerApp(QMainWindow):
             QMessageBox.warning(self, "경고", "먼저 DB파일을 선택(파일설정)해주세요.")
             return None
         return db_path
+    
+    def open_coord_calibrator(self):
+        db_path = self.get_current_db()  # 없으면 None으로 열고 싶으면 이 줄 수정
+        CoordCalibratorDialog(self, db_path=db_path).exec_()
+
 
     def open_form_setting(self):
         db_path = self.get_current_db()
@@ -182,9 +194,6 @@ class OMRScannerApp(QMainWindow):
         if db_path:
             SiteSettingsDialog(self, db_path).exec_()
 
-    def on_db_changed(self, path, title):
-        self.setWindowTitle(f"김세윤omr_project - [{title}]")
-        self.statusbar.showMessage(f"현재 열린 DB: {path}")
-
         # ✅ 추가: 스캐너 화면에 현재 프로젝트 DB 경로 전달
-        self.scanner_view.set_project_db(path)
+        self.scanner_view.set_current_db(path)
+

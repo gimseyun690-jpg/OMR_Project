@@ -47,10 +47,14 @@ class ControlPanel(QWidget):
         self.btn_scan = QPushButton("📄 현재시험실 스캔(R)"); self.btn_scan.setStyleSheet(style_blue)
         self.btn_check = QPushButton("✔️ 오류미확인 점검(A)"); self.btn_check.setStyleSheet(style_green)
         self.btn_next = QPushButton("▶ 다음시험실 스캔(N)"); self.btn_next.setStyleSheet(style_blue)
+        self.btn_demo = QPushButton("📂 테스트 이미지 불러오기")
+
         
         layout.addWidget(self.btn_scan)
         layout.addWidget(self.btn_check)
         layout.addWidget(self.btn_next)
+        layout.addWidget(self.btn_demo)
+
 
         # ----------------------------------------------------
         # 2. 체크박스
