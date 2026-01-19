@@ -170,8 +170,9 @@ class OMRScannerApp(QMainWindow):
         return db_path
     
     def open_coord_calibrator(self):
-        db_path = self.get_current_db()  # 없으면 None으로 열고 싶으면 이 줄 수정
-        CoordCalibratorDialog(self, db_path=db_path).exec_()
+        db_path = self.get_current_db()
+        if db_path:
+            CoordCalibratorDialog(self, db_path).exec_()
 
 
     def open_form_setting(self):

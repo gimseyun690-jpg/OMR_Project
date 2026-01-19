@@ -59,24 +59,54 @@ def load_form(path: str) -> dict:
 # -------------------------------------------------
 def build_rois_from_form(form_data: dict):
     """
-    form_data 기반으로 [(agree_roi, disagree_roi), ...] 생성
+    form_data 기반 ROI 생성
+    - vote: agree_x / disagree_x
+    - exam: choice_x 리스트 (자동/수동 모두 대응)
     """
-    roi = form_data.get("roi", {})
-    questions = int(form_data.get("questions", 0))
-
-    start_y = int(roi.get("start_y", 0))
-    gap_y = int(roi.get("gap_y", 0))
-    w = int(roi.get("w", 0))
-    h = int(roi.get("h", 0))
-    agree_x = int(roi.get("agree_x", 0))
-    disagree_x = int(roi.get("disagree_x", 0))
-
     rois = []
+
+    roi_cfg = form_data.get("roi", {})
+    questions = int(form_data.get("questions", 0) or 0)
+
+    start_y = int(roi_cfg.get("start_y", 0))
+    gap_y = int(roi_cfg.get("gap_y", 0))
+    w = int(roi_cfg.get("w", 30))
+    h = int(roi_cfg.get("h", 30))
+
+    if questions <= 0:
+        return rois
+
+    # ---------------------------
+    # 1️⃣ 시험 OMR (choice_x)
+    # ---------------------------
+    if "choice_x" in roi_cfg:
+        choice_x = roi_cfg.get("choice_x", [])
+        if not choice_x:
+            return rois
+
+        for i in range(questions):
+            y = start_y + i * gap_y
+            row = []
+            for x in choice_x:
+                row.append((int(x), int(y), w, h))
+            rois.append(row)
+
+        return rois
+
+    # ---------------------------
+    # 2️⃣ 투표 OMR (찬성/반대)
+    # ---------------------------
+    agree_x = roi_cfg.get("agree_x")
+    disagree_x = roi_cfg.get("disagree_x")
+
+    if agree_x is None or disagree_x is None:
+        return rois
+
     for i in range(questions):
         y = start_y + i * gap_y
         rois.append([
-            (agree_x, y, w, h),
-            (disagree_x, y, w, h)
+            (int(agree_x), int(y), w, h),
+            (int(disagree_x), int(y), w, h),
         ])
 
     return rois
