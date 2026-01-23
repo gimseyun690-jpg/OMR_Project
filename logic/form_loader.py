@@ -136,7 +136,7 @@ def get_anchor_from_form(form_data: dict):
 def get_omr_params(form_data: dict):
     omr = form_data.get("omr", {})
     thresh = int(omr.get("threshold", 140))
-    ratio = float(omr.get("pixel_ratio", 0.25))
+    ratio = float(omr.get("pixel_ratio", 0.05))
     return thresh, ratio
 
 

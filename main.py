@@ -7,8 +7,8 @@ import os
 try:
     os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
     sys.argv += ['--style', 'Fusion'] 
-except:
-    pass
+except Exception as e:
+    print(f"[InitWarn] Qt scaling/style 설정 실패: {e}")
 
 # ========================================================
 # [2] PyQt5 플러그인 경로 강제 지정 (오류 방지)

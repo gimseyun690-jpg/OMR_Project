@@ -194,7 +194,3 @@ class OMRScannerApp(QMainWindow):
         db_path = self.get_current_db()
         if db_path:
             SiteSettingsDialog(self, db_path).exec_()
-
-        # ✅ 추가: 스캐너 화면에 현재 프로젝트 DB 경로 전달
-        self.scanner_view.set_current_db(path)
-

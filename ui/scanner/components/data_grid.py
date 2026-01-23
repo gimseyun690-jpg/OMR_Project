@@ -16,6 +16,7 @@ class DataGrid(QTableWidget):
         self.verticalHeader().setVisible(False) # 행번호 숨김
         self.setAlternatingRowColors(True)      # 줄무늬
         self.setSelectionBehavior(QAbstractItemView.SelectRows) # 행 단위 선택
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.setStyleSheet("""
             QTableWidget { background-color: white; gridline-color: #d0d0d0; }
             QHeaderView::section { 

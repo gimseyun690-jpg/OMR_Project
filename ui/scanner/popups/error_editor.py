@@ -22,6 +22,7 @@ class ErrorCorrectionDialog(QDialog):
         self.image_cv = image_cv
         self.scan_results = scan_results # 리스트 딕셔너리 [{'q_num':1, 'marked':[0], 'status':'정상'}...]
         self.image_path = image_path
+        self.exit_code = 0
 
         self.init_ui()
         self.connect_signals() # ★ 버튼 기능 연결
@@ -299,21 +300,25 @@ class ErrorCorrectionDialog(QDialog):
         else:
             super().keyPressEvent(event)
 
+    # =========================================================
+    # ★ 핵심 수정 부분: exit_code 설정하여 메인에 알림
+    # =========================================================
     def save_and_close(self):
-        """저장 버튼 클릭 시"""
-        # 여기서는 데이터를 부모에게 돌려주거나 DB에 저장하는 로직이 필요하지만
-        # 지금은 '수정된 데이터'가 self.scan_results에 들어있으므로, 
-        # 그냥 창을 닫으면 부모가 이 데이터를 가져다 쓰면 됩니다.
-        self.accept() 
+        """저장(S) 버튼"""
+        self.exit_code = 1 # 1 = 저장하고 다음으로
+        self.accept()      # 창 닫기
 
     def on_prev(self):
-        """이전 자료 요청"""
-        self.request_prev.emit() # 부모에게 신호 발사
-        # (아직 부모창에 처리 로직이 없으면 반응 없음)
+        """이전 버튼"""
+        self.exit_code = 2 # 2 = 저장 안 하고 이전으로
+        self.request_prev.emit() # (선택사항) 신호도 보내고
+        self.accept()      # 창 닫기
 
     def on_next(self):
-        """다음 자료 요청"""
-        self.request_next.emit() # 부모에게 신호 발사
+        """다음 버튼"""
+        self.exit_code = 3 # 3 = 저장 안 하고 다음으로
+        self.request_next.emit() # (선택사항) 신호도 보내고
+        self.accept()      # 창 닫기
 
     def update_image(self):
         if self.image_cv is not None:

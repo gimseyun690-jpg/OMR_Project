@@ -5,165 +5,233 @@ import os
 class OMREngine:
     def __init__(self):
         self.threshold_value = 140  # 흑/백 마킹 구분 기준
-        self.pixel_threshold = 0.05 # 칸의 2% 이상 채워지면 마킹으로 인정
-        
-        # [중요] 변환될 표준 이미지 크기 (A4 비율 기준 고해상도)
-        # 이 크기로 이미지를 '강제 정렬' 시킵니다.
-        # 아까 find.py로 좌표를 딸 때 썼던 이미지의 해상도와 비슷해야 좋습니다.
-        # (스캐너가 보통 width=1600~2400 정도 나옵니다. 적절히 고정합니다.)
-        self.width = 1654 
-        self.height = 2339 
+        self.pixel_threshold = 0.05 # 칸의 5% 이상 채워지면 마킹으로 인정
+
+        # 표준 변환 크기 (A4 비율)
+        self.width = 1654
+        self.height = 2339
 
     def configure(self, threshold, pixel_ratio):
-        """외부(DB)에서 설정을 받아와 적용하는 함수"""
-        self.threshold_value = int(threshold)
+        """외부(DB/JSON)에서 설정을 받아와 적용"""
+        self.threshold_value = int(float(threshold))
         self.pixel_threshold = float(pixel_ratio)
-        # print(f"설정 적용됨: 임계값={self.threshold_value}, 비율={self.pixel_threshold}")
 
     def load_image(self, image_path):
         """이미지 로드 (한글 경로 대응 + 컬러로 읽기)"""
         if not os.path.exists(image_path):
             return None
-        # 한글 경로 파일 읽기
         img_array = np.fromfile(image_path, np.uint8)
-        # 컬러로 읽어야 디버그 박스(빨강/초록)를 그릴 수 있음
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR) 
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
         return img
 
     def reorder(self, myPoints):
-        """
-        네 모서리 점을 [좌상, 우상, 우하, 좌하] 순서로 정렬하는 함수
-        이게 있어야 종이가 뒤집히지 않고 똑바로 펴집니다.
-        """
+        """네 모서리 점 정렬 (좌상, 우상, 우하, 좌하)"""
         myPoints = myPoints.reshape((4, 2))
         myPointsNew = np.zeros((4, 1, 2), np.int32)
-        
+
         add = myPoints.sum(1)
-        myPointsNew[0] = myPoints[np.argmin(add)] # x+y가 최소인 곳 -> 좌상
-        myPointsNew[2] = myPoints[np.argmax(add)] # x+y가 최대인 곳 -> 우하
-        
+        myPointsNew[0] = myPoints[np.argmin(add)]  # 좌상
+        myPointsNew[2] = myPoints[np.argmax(add)]  # 우하
+
         diff = np.diff(myPoints, axis=1)
-        myPointsNew[1] = myPoints[np.argmin(diff)] # x-y가 최소 -> 우상
-        myPointsNew[3] = myPoints[np.argmax(diff)] # x-y가 최대 -> 좌하
+        myPointsNew[1] = myPoints[np.argmin(diff)] # 우상
+        myPointsNew[3] = myPoints[np.argmax(diff)] # 좌하
         return myPointsNew
 
-    def align_image(self, img):
+    # =========================================================
+    # 종이 외곽선 찾아 펴기 (Auto-Deskew)
+    # =========================================================
+    def align_image(self, img, json_data=None):
         """
-        [핵심 기술] 종이의 외곽선을 찾아 반듯하게 펴주는 함수 (투시 변환)
+        [업그레이드] 종이 외곽선 또는 내부 표 테두리를 찾아 반듯하게 펴주는 함수
+        return: (aligned_img, ok, reason)
         """
-        # 1. 전처리 (흑백 -> 블러 -> 엣지 검출)
+        if img is None:
+            return None, False, "image_none"
+
+        # 1. [1단계 시도] 종이 외곽선 찾기 (기존 로직)
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 1)
         canny = cv2.Canny(blur, 10, 50)
         
-        # 2. 윤곽선 찾기
-        contours, _ = cv2.findContours(canny, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contours_info = cv2.findContours(canny, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
         
         biggest = np.array([])
         max_area = 0
         
-        # 3. 가장 큰 사각형(시험지) 찾기
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area > 5000: # 너무 작은 잡티는 무시
+            if area > 5000:
                 peri = cv2.arcLength(cnt, True)
                 approx = cv2.approxPolyDP(cnt, 0.02 * peri, True)
-                
-                # 점이 4개(사각형)이고, 가장 큰 면적이라면? -> 시험지다!
                 if area > max_area and len(approx) == 4:
                     biggest = approx
                     max_area = area
         
-        # 4. 찾았다면 -> 반듯하게 펴기 (Warp)
+        # 2. [2단계 시도] 외곽선을 못 찾았다면? -> 표 테두리 감지기(table_corner_detector) 호출
+        if biggest.size == 0:
+            try:
+                from logic.vision.table_corner_detector import detect_table_corners
+                corners, _ = detect_table_corners(img)
+                if corners:
+                    # 찾은 코너를 biggest 포맷(4x1x2 배열)으로 변환
+                    biggest = np.array([
+                        [corners["TL"]], [corners["TR"]], [corners["BR"]], [corners["BL"]]
+                    ], dtype=np.int32)
+            except ImportError:
+                pass # 모듈이 없으면 패스
+            except Exception as e:
+                print(f"[Warn] 표 테두리 감지 실패: {e}")
+
+        # 3. 투시 변환 (Warp) 수행
         if biggest.size != 0:
             biggest = self.reorder(biggest)
             pts1 = np.float32(biggest)
-            pts2 = np.float32([[0, 0], [self.width, 0], [0, self.height], [self.width, self.height]])
+            
+            # 좌상, 우상, 우하, 좌하 순서
+            pts2 = np.float32([
+                [0, 0],
+                [self.width - 1, 0],
+                [self.width - 1, self.height - 1],
+                [0, self.height - 1]
+            ])
             
             matrix = cv2.getPerspectiveTransform(pts1, pts2)
             img_warped = cv2.warpPerspective(img, matrix, (self.width, self.height))
             
-            # 잘라낸 이미지는 약간의 여백 제거를 위해 살짝 크롭(선택사항)
-            # img_cropped = img_warped[20:img_warped.shape[0]-20, 20:img_warped.shape[1]-20]
-            # img_cropped = cv2.resize(img_cropped, (self.width, self.height))
-            return img_warped
-        
-        else:
-            # 못 찾았으면 원본 그대로 반환 (배경이 너무 밝거나 종이가 안 보임)
-            return cv2.resize(img, (self.width, self.height))
+            return img_warped, True, "warp_ok"
 
+        # 4. 정 안되면 원본 리사이즈 반환
+        return cv2.resize(img, (self.width, self.height)), False, "fallback_resize"
+
+    # =========================================================
+    # 사이드 마크 감지
+    # =========================================================
+    def find_side_markers(self, image, min_area=100, max_area=5000):
+        """
+        반환값: [{'cx': int, 'cy': int}, ...] (Y좌표 순 정렬)
+        - Otsu 이진화로 밝기 편차 대응
+        - findContours 호환 처리
+        """
+        try:
+            if image is None:
+                return []
+
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+            # ✅ 자동 임계값(Otsu)
+            _, binary = cv2.threshold(
+                gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+            )
+
+            contours_info = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
+
+            h, w = image.shape[:2]
+            markers = []
+
+            for cnt in contours:
+                area = cv2.contourArea(cnt)
+                if not (min_area < area < max_area):
+                    continue
+
+                x, y, bw, bh = cv2.boundingRect(cnt)
+                if bh <= 0:
+                    continue
+
+                aspect_ratio = float(bw) / float(bh)
+                if not (0.6 < aspect_ratio < 1.7):
+                    continue
+
+                # 왼쪽 20% 영역
+                if x > (w * 0.2):
+                    continue
+
+                M = cv2.moments(cnt)
+                if M["m00"] != 0:
+                    cx = int(M["m10"] / M["m00"])
+                    cy = int(M["m01"] / M["m00"])
+                    markers.append({"cx": cx, "cy": cy})
+
+            markers.sort(key=lambda m: m["cy"])
+            return markers
+
+        except Exception as e:
+            print(f"[Warning] 사이드 마크 검색 중 오류: {e}")
+            return []
+
+    def _clamp_roi(self, image, x, y, w, h):
+        if image is None or w <= 0 or h <= 0:
+            return None
+        H, W = image.shape[:2]
+        x1 = max(0, int(x))
+        y1 = max(0, int(y))
+        x2 = min(W, int(x) + int(w))
+        y2 = min(H, int(y) + int(h))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return (x1, y1, x2 - x1, y2 - y1)
+
+    def get_marking_score(self, image, x, y, w, h):
+        """ROI의 검은색 픽셀 수 반환 (안전 클램프 적용)"""
+        c = self._clamp_roi(image, x, y, w, h)
+        if c is None:
+            return 0
+        x, y, w, h = c
+
+        roi = image[y:y+h, x:x+w]
+        if roi.size == 0:
+            return 0
+
+        gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(gray_roi, self.threshold_value, 255, cv2.THRESH_BINARY_INV)
+        return cv2.countNonZero(mask)
+
+    # =========================================================
+    # 고정 좌표(ROI) 기반 판독
+    # =========================================================
     def analyze_sheet(self, image_path, questions_rois, ref_anchor=None):
-        """
-        [호환용] path를 받아 이미지 로드 후 analyze_sheet_cv로 위임
-        """
         original_img = self.load_image(image_path)
         if original_img is None:
             return "ERROR", [], None
-
-        return self.analyze_sheet_cv(original_img, questions_rois, ref_anchor=ref_anchor)
+        return self.analyze_sheet_cv(original_img, questions_rois, ref_anchor)
 
     def analyze_sheet_cv(self, original_img, questions_rois, ref_anchor=None):
-        """
-        [신규] 이미 로드된 cv 이미지(ndarray)를 받아 판독
-        - pipeline에서 deskew/warp한 이미지를 그대로 넘길 수 있게 됨
-        """
+        """이미지(numpy)를 받아 ROI 리스트를 순회하며 판독"""
         if original_img is None:
             return "ERROR", [], None
 
-        # 엔진 내부에서 이미지 크기 최신화 (중요)
-        self.height, self.width = original_img.shape[:2]
+        H, W = original_img.shape[:2]  # ✅ 로컬 변수 사용 (엔진 표준 크기 값은 건드리지 않음)
 
-        # 1) 정렬/워핑 단계 (지금은 pass, 나중에 align_image로 교체)
-        aligned_img = original_img
+        img_gray = cv2.cvtColor(original_img, cv2.COLOR_BGR2GRAY)
+        _, binary_img = cv2.threshold(img_gray, self.threshold_value, 255, cv2.THRESH_BINARY_INV)
 
-        # 2) 그레이 + 이진화
-        img_gray = cv2.cvtColor(aligned_img, cv2.COLOR_BGR2GRAY)
-
-        # threshold_value가 고정값이면 기존처럼, 아니라면 OTSU 옵션도 가능
-        # 지금은 기존 로직 유지
-        _, binary_img = cv2.threshold(
-            img_gray, int(self.threshold_value), 255, cv2.THRESH_BINARY_INV
-        )
-
-        debug_img = aligned_img.copy()
-
+        debug_img = original_img.copy()
         sheet_results = []
         has_error = False
 
-        # ROI 순회
         for q_idx, rois in enumerate(questions_rois):
             marked_indices = []
 
             for r_idx, (x, y, w, h) in enumerate(rois):
-                # ROI가 이미지 밖이면 안전하게 스킵/클립
-                x = int(x); y = int(y); w = int(w); h = int(h)
-                if w <= 0 or h <= 0:
+                c = self._clamp_roi(binary_img, x, y, w, h)
+                if c is None:
                     continue
+                x, y, w, h = c
 
-                x0 = max(0, x)
-                y0 = max(0, y)
-                x1 = min(self.width, x + w)
-                y1 = min(self.height, y + h)
-
-                if x1 <= x0 or y1 <= y0:
-                    continue
-
-                roi = binary_img[y0:y1, x0:x1]
-
+                roi = binary_img[y:y+h, x:x+w]
                 marked_pixels = cv2.countNonZero(roi)
-                area = (x1 - x0) * (y1 - y0)
+                area = w * h
                 fill_ratio = (marked_pixels / area) if area > 0 else 0.0
+                is_marked = fill_ratio > self.pixel_threshold
 
-                is_marked = fill_ratio > float(self.pixel_threshold)
-
-                # 시각화 (초록/빨강)
                 color = (0, 255, 0) if is_marked else (0, 0, 255)
-                cv2.rectangle(debug_img, (x0, y0), (x1, y1), color, 2)
+                cv2.rectangle(debug_img, (x, y), (x+w, y+h), color, 2)
 
                 if is_marked:
                     marked_indices.append(r_idx)
 
-            # 상태 결정
             if len(marked_indices) == 0:
                 status = "공란"
                 has_error = True
@@ -179,20 +247,20 @@ class OMREngine:
                 "status": status
             })
 
-            # 오류 강조(보라)
             if status != "정상" and rois:
                 try:
-                    x1 = min(int(r[0]) for r in rois)
-                    y1 = min(int(r[1]) for r in rois)
-                    x2 = max(int(r[0] + r[2]) for r in rois)
-                    y2 = max(int(r[1] + r[3]) for r in rois)
-
-                    x1 = max(0, x1 - 5); y1 = max(0, y1 - 5)
-                    x2 = min(self.width - 1, x2 + 5)
-                    y2 = min(self.height - 1, y2 + 5)
-
-                    cv2.rectangle(debug_img, (x1, y1), (x2, y2), (255, 0, 255), 3)
-                except Exception:
+                    bx1 = min(r[0] for r in rois)
+                    by1 = min(r[1] for r in rois)
+                    bx2 = max(r[0] + r[2] for r in rois)
+                    by2 = max(r[1] + r[3] for r in rois)
+                    cv2.rectangle(
+                        debug_img,
+                        (int(bx1) - 5, int(by1) - 5),
+                        (int(bx2) + 5, int(by2) + 5),
+                        (255, 0, 255),
+                        3
+                    )
+                except:
                     pass
 
         final_status = "오류" if has_error else "정상"

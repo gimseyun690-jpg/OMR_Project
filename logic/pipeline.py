@@ -1,23 +1,28 @@
-# logic/pipeline.py
 import os
+import traceback
 import cv2
 import numpy as np
-
-from logic.vision.grid_detector import find_timing_mark
-from logic.vision.preprocessor import rotate_image_keep_size
-from logic.vision.preprocessor import warp_to_form
-from logic.form_loader import get_timing_marks
+import json
 
 from logic.omr_engine import OMREngine
 from database import DBManager
-from logic.form_loader import(
-    load_form, build_rois_from_form, get_anchor_from_form, get_omr_params, get_sheet_code
-)
+
+# 기존 로직 유지를 위한 헬퍼 함수들 (폼 로더에서 가져옴)
+from logic.form_loader import build_rois_from_form
 
 DEFAULT_SCAN_DIR = os.path.join(os.getcwd(), "data", "scan_images")
 
 
 class ScanPipeline:
+    """
+    패치 포인트
+    - engine.configure()에 들어가는 thresh/ratio 타입 강제(int/float)
+    - side_marker: 마커 cy 기준 정렬 + ROI 경계 클램프 + ratio threshold 의미 통일
+    - ROI가 이미지 밖이면 안전 처리(공란/오류로 반영)
+    - status 내부 통일(OK/ERR) -> UI 반환에서 한글 표시
+    - (옵션) 에러 시 debug 이미지 저장 가능
+    """
+
     def __init__(self):
         self.db = DBManager()
         self.engine = OMREngine()
@@ -28,216 +33,220 @@ class ScanPipeline:
         self.form_path = None
         self.form_data = None
 
-    # ====== 외부에서 설정 ======
+        # 디버그 이미지 저장 옵션
+        self.debug_save_on_error = False
+        self.debug_dir = os.path.join(os.getcwd(), "data", "scan_debug")
+        os.makedirs(self.debug_dir, exist_ok=True)
+
+    # ====== 외부 설정 ======
     def set_project(self, db_path: str | None):
         self.current_db_path = db_path
 
     def set_scan_dir(self, scan_dir: str):
         self.scan_dir = scan_dir
 
+    def set_debug_options(self, save_on_error: bool, debug_dir: str | None = None):
+        self.debug_save_on_error = bool(save_on_error)
+        if debug_dir:
+            self.debug_dir = debug_dir
+        os.makedirs(self.debug_dir, exist_ok=True)
+
+    def _safe_int(self, v, default: int):
+        try:
+            return int(float(v))
+        except Exception:
+            return default
+
+    def _safe_float(self, v, default: float):
+        try:
+            return float(v)
+        except Exception:
+            return default
+
+    def _status_to_code(self, status: str | None) -> str:
+        """엔진/내부에서 들어오는 다양한 status를 OK/ERR로 통일"""
+        if not status:
+            return "ERR"
+        s = str(status).strip().lower()
+        if s in ("정상", "normal", "ok", "success", "good"):
+            return "OK"
+        if s in ("오류", "error", "fail", "failed", "ng"):
+            return "ERR"
+        # 애매하면 ERR로 보수적으로
+        return "ERR"
+
+    def _code_to_ui_status(self, code: str) -> str:
+        return "정상" if code == "OK" else "오류"
+
     def set_form_path(self, form_path: str | None):
-        """cb_form 선택 변경 때 호출"""
+        """콤보박스에서 폼 선택 시 호출"""
         self.form_path = form_path
         self.form_data = None
+
         if form_path and os.path.exists(form_path):
-            self.form_data = load_form(form_path)
+            try:
+                with open(form_path, "r", encoding="utf-8") as f:
+                    self.form_data = json.load(f)
 
-            # 폼의 omr 파라미터 즉시 적용
-            thresh, ratio = get_omr_params(self.form_data)
-            self.engine.configure(thresh, ratio)
+                # 폼의 OMR 파라미터 즉시 적용 (타입 강제)
+                omr_settings = self.form_data.get("omr", {}) if isinstance(self.form_data, dict) else {}
+                thresh = self._safe_int(omr_settings.get("threshold", 140), 140)
+                ratio = self._safe_float(omr_settings.get("pixel_ratio", 0.05), 0.05)
+                self.engine.configure(thresh, ratio)
 
-    # ====== 내부 유틸 ======
+            except Exception as e:
+                print(f"폼 로드 오류: {e}")
+                print(traceback.format_exc())
+
+    # ====== [복구됨] 내부 유틸: DB에서 설정 가져오기 ======
     def _get_params_from_db(self):
-        """폼 없을 때 fallback: DB settings"""
-        ref_x = int(self.db.get_setting(self.current_db_path, "ref_x", "100"))
-        ref_y = int(self.db.get_setting(self.current_db_path, "ref_y", "500"))
-        anchor = (ref_x, ref_y)
+        """JSON 폼이 없을 때 DB 설정값 사용 (기존 기능 복구)"""
+        if not self.current_db_path:
+            return [], None, "Unknown"
 
-        thresh = self.db.get_setting(self.current_db_path, "omr_threshold", "140")
-        ratio = self.db.get_setting(self.current_db_path, "omr_pixel_ratio", "0.25")
-        self.engine.configure(thresh, ratio)
-
-        # roi 생성 (네 기존 get_rois 로직과 동일)
-        start_y = int(self.db.get_setting(self.current_db_path, "roi_start_y", "515"))
-        gap_y = int(self.db.get_setting(self.current_db_path, "roi_gap_y", "90"))
-        w = int(self.db.get_setting(self.current_db_path, "roi_w", "35"))
-        h = int(self.db.get_setting(self.current_db_path, "roi_h", "35"))
-        x_agree = int(self.db.get_setting(self.current_db_path, "roi_agree_x", "1130"))
-        x_disagree = int(self.db.get_setting(self.current_db_path, "roi_disagree_x", "1275"))
+        # 좌표 설정 불러오기
+        start_y = self._safe_int(self.db.get_setting(self.current_db_path, "roi_start_y", "515"), 515)
+        gap_y = self._safe_int(self.db.get_setting(self.current_db_path, "roi_gap_y", "90"), 90)
+        w = self._safe_int(self.db.get_setting(self.current_db_path, "roi_w", "35"), 35)
+        h = self._safe_int(self.db.get_setting(self.current_db_path, "roi_h", "35"), 35)
+        x_agree = self._safe_int(self.db.get_setting(self.current_db_path, "roi_agree_x", "1130"), 1130)
+        x_disagree = self._safe_int(self.db.get_setting(self.current_db_path, "roi_disagree_x", "1275"), 1275)
 
         rois = []
         for i in range(5):
             y = start_y + (i * gap_y)
             rois.append([(x_agree, y, w, h), (x_disagree, y, w, h)])
 
+        # 기타 설정 (타입 강제!)
+        thresh = self._safe_int(self.db.get_setting(self.current_db_path, "omr_threshold", "140"), 140)
+        ratio = self._safe_float(self.db.get_setting(self.current_db_path, "omr_pixel_ratio", "0.05"), 0.05)
+        self.engine.configure(thresh, ratio)
+
         sheet_code = self.db.get_setting(self.current_db_path, "sheet_code", "OMR_V1")
-        return rois, anchor, sheet_code
+        return rois, None, sheet_code
 
     def _result_to_string(self, results):
-        """results -> '01231' 규칙(네 코드와 동일)"""
+        """결과 리스트 -> '01231' 문자열 변환"""
         s = ""
         for r in results:
-            if len(r["marked"]) == 0:
+            marked = r.get("marked", []) if isinstance(r, dict) else []
+            if len(marked) == 0:
                 val = "0"
-            elif len(r["marked"]) > 1:
+            elif len(marked) > 1:
                 val = "3"
-            elif 0 in r["marked"]:
+            elif 0 in marked:
                 val = "1"
-            elif 1 in r["marked"]:
+            elif 1 in marked:
                 val = "2"
             else:
                 val = "0"
             s += val
         return s
 
-    # ====== 메인 ======
+    def _clamp_roi(self, img, x, y, w, h):
+        """ROI를 이미지 경계로 클램프. 유효하지 않으면 None."""
+        if img is None or w <= 0 or h <= 0:
+            return None
+        H, W = img.shape[:2]
+        x1 = max(0, int(x))
+        y1 = max(0, int(y))
+        x2 = min(W, int(x) + int(w))
+        y2 = min(H, int(y) + int(h))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return (x1, y1, x2 - x1, y2 - y1)
+
+    def _get_effective_ratio_threshold(self) -> float:
+        """
+        side_marker에서 사용할 '비율 기준' 임계값.
+        - JSON 폼이 있으면 폼의 omr.pixel_ratio 우선
+        - 없으면 engine의 설정값(이름이 다를 수 있어 fallbacks)
+        """
+        # 폼 우선
+        if isinstance(self.form_data, dict):
+            omr_settings = self.form_data.get("omr", {})
+            if isinstance(omr_settings, dict) and "pixel_ratio" in omr_settings:
+                return self._safe_float(omr_settings.get("pixel_ratio", 0.05), 0.05)
+
+        # 엔진 fallback: 가능한 속성명을 최대한 흡수
+        for attr in ("pixel_ratio", "pixel_threshold", "mark_ratio_threshold", "ratio_threshold"):
+            if hasattr(self.engine, attr):
+                try:
+                    v = float(getattr(self.engine, attr))
+                    # 비율이라고 가정: 0~1 범위를 벗어나면 기본값으로
+                    if 0.0 <= v <= 1.0:
+                        return v
+                except Exception:
+                    pass
+
+        return 0.05
+
+    def _save_debug_if_needed(self, debug_img, image_path: str, reason: str):
+        if not self.debug_save_on_error:
+            return None
+        if debug_img is None:
+            return None
+
+        base = os.path.splitext(os.path.basename(image_path))[0]
+        out = os.path.join(self.debug_dir, f"{base}__{reason}.jpg")
+        try:
+            cv2.imwrite(out, debug_img)
+            return out
+        except Exception:
+            return None
+
+    # ====== 메인 프로세스 ======
     def process_image(self, image_path: str, read_num: int, place: str, room: str) -> list[str]:
-        # 0) 폼/DB 파라미터 준비
-        if self.form_data:
-            rois = build_rois_from_form(self.form_data)
-            anchor = get_anchor_from_form(self.form_data)
-            sheet_code = get_sheet_code(self.form_data)
+        # 1) 이미지 로드 (Engine이 한글 경로 처리)
+        img = self.engine.load_image(image_path)
+        if img is None:
+            return self._create_error_result(read_num, place, room, image_path, "이미지 로드 실패")
 
-            thresh, ratio = get_omr_params(self.form_data)
-            self.engine.configure(thresh, ratio)
+        # 2) 이미지 정렬 (Auto-Deskew / 투영 변환)
+        aligned_img, align_ok, align_reason = self.engine.align_image(img, self.form_data)
+        if aligned_img is None or not align_ok:
+            reason = f"이미지 정렬 실패({align_reason})"
+            self._save_debug_if_needed(aligned_img or img, image_path, "ALIGN_FAIL")
+            return self._create_error_result(read_num, place, room, image_path, reason)
 
-            # =========================================================
-            # ✅ [여기부터] 이미지 1번 로드 + 타이밍마크 dx/dy + deskew
-            # =========================================================
-            img = None
-            try:
-                arr = np.fromfile(image_path, np.uint8)
-                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            except Exception:
-                img = None
+        # 3) 판독 모드 결정 및 실행
+        sheet_code = "Unknown"
+        status_code = "ERR"
+        results = []
+        debug_img = aligned_img.copy()
 
-            if img is None:
-                # 이미지 로드 실패
-                status, results, debug_img = "ERROR", [], None
+        try:
+            # [CASE A] JSON 폼이 선택된 경우
+            if isinstance(self.form_data, dict):
+                sheet_code = self.form_data.get("sheet_code", "Unknown")
+                layout_mode = self.form_data.get("layout_mode", "fixed")
+
+                if layout_mode == "side_marker":
+                    status_code, results, debug_img = self._process_side_marker_mode(aligned_img)
+                else:
+                    status_code, results, debug_img = self._process_json_fixed_mode(aligned_img)
+
+            # [CASE B] JSON 폼이 없는 경우 -> DB 설정 사용 (Legacy Mode)
             else:
-                dx = 0
-                dy = 0
+                rois, _, db_sheet_code = self._get_params_from_db()
+                sheet_code = db_sheet_code
+                status, results, debug_img = self.engine.analyze_sheet_cv(aligned_img, rois, ref_anchor=None)
+                status_code = self._status_to_code(status)
 
-                marks = get_timing_marks(self.form_data)
+        except Exception as e:
+            print(f"Processing Error: {e}")
+            print(traceback.format_exc())
+            status_code = "ERR"
 
-                # ===== Step C: 원근보정(warp) 먼저 시도 =====
-                warped_ok = False
-                img_to_read = img  # 기본은 원본
+        # 4) 결과/저장
+        result_str = self._result_to_string(results)
+        ui_status = self._code_to_ui_status(status_code)
+        is_valid = 1 if status_code == "OK" else 0
 
-                mark_map = {m.get("name"): m for m in marks} if marks else {}
-                need = ["TL", "TR", "BL", "BR"]
+        # 에러 시 debug 이미지 저장(옵션)
+        if status_code != "OK":
+            self._save_debug_if_needed(debug_img, image_path, "ERR")
 
-                if all(k in mark_map for k in need):
-                    found_pts = {}
-                    for k in need:
-                        m = mark_map[k]
-                        rect = (
-                            int(m["x"]),
-                            int(m["y"]),
-                            int(m.get("w", 80)),
-                            int(m.get("h", 80)),
-                        )
-                        pt = find_timing_mark(img, rect)
-                        if pt:
-                            found_pts[k] = pt
-
-                    if all(k in found_pts for k in need):
-                        src_pts = [
-                            found_pts["TL"],
-                            found_pts["TR"],
-                            found_pts["BR"],
-                            found_pts["BL"],
-                        ]
-                        dst_pts = [
-                            (int(mark_map["TL"]["x"]), int(mark_map["TL"]["y"])),
-                            (int(mark_map["TR"]["x"]), int(mark_map["TR"]["y"])),
-                            (int(mark_map["BR"]["x"]), int(mark_map["BR"]["y"])),
-                            (int(mark_map["BL"]["x"]), int(mark_map["BL"]["y"])),
-                        ]
-
-                        h, w = img.shape[:2]
-                        img_to_read, _ = warp_to_form(img, src_pts, dst_pts, (w, h))
-                        warped_ok = True
-
-                # ===== fallback: warp 실패시에만 dx/dy + deskew 수행 =====
-                if not warped_ok:
-                    # --- dx/dy 계산 (오프셋 보정) ---
-                    if marks:
-                        diffs = []
-                        for m in marks:
-                            rect = (
-                                int(m["x"]),
-                                int(m["y"]),
-                                int(m.get("w", 60)),
-                                int(m.get("h", 60))
-                            )
-                            found = find_timing_mark(img, rect)
-                            if found:
-                                fx, fy = found
-                                diffs.append((fx - int(m["x"]), fy - int(m["y"])))
-
-                        if diffs:
-                            dx = int(sum(d[0] for d in diffs) / len(diffs))
-                            dy = int(sum(d[1] for d in diffs) / len(diffs))
-
-                    # rois/anchor에 오프셋 적용
-                    if dx != 0 or dy != 0:
-                        shifted = []
-                        for pair in rois:
-                            (ax, ay, aw, ah), (bx, by, bw, bh) = pair
-                            shifted.append([
-                                (ax + dx, ay + dy, aw, ah),
-                                (bx + dx, by + dy, bw, bh)
-                            ])
-                        rois = shifted
-                        anchor = (anchor[0] + dx, anchor[1] + dy)
-
-                    # --- deskew (회전) ---
-                    angle_deg = 0.0
-                    tl = mark_map.get("TL")
-                    tr = mark_map.get("TR")
-
-                    if tl and tr:
-                        tl_rect = (int(tl["x"]) + dx, int(tl["y"]) + dy, int(tl.get("w", 60)), int(tl.get("h", 60)))
-                        tr_rect = (int(tr["x"]) + dx, int(tr["y"]) + dy, int(tr.get("w", 60)), int(tr.get("h", 60)))
-
-                        tl_found = find_timing_mark(img, tl_rect)
-                        tr_found = find_timing_mark(img, tr_rect)
-
-                        if tl_found and tr_found:
-                            x1, y1 = tl_found
-                            x2, y2 = tr_found
-
-                            import math
-                            angle_rad = math.atan2((y2 - y1), (x2 - x1))
-                            angle_deg = angle_rad * 180.0 / math.pi
-
-                            if abs(angle_deg) > 15:
-                                angle_deg = 0.0
-
-                    img_to_read = img
-                    if abs(angle_deg) > 0.01:
-                        img_to_read, _ = rotate_image_keep_size(img, -angle_deg)
-                
-                print(f"[WARP] {'OK' if warped_ok else 'FAIL'} | dx={dx} dy={dy}")
-
-                # ✅ 핵심: 엔진을 cv 이미지로 호출
-                status, results, debug_img = self.engine.analyze_sheet_cv(img_to_read, rois, anchor)
-            # =========================================================
-            # ✅ [여기까지] 이미지 보정 + analyze_sheet_cv 호출
-            # =========================================================
-
-        else:
-            # DB 기반 기존 로직 유지
-            rois, anchor, sheet_code = self._get_params_from_db()
-
-            # DB 기반은 기존처럼 path로 호출해도 되지만, 통일하려면 cv로 로드해도 됨
-            status, results, debug_img = self.engine.analyze_sheet(image_path, rois, anchor)
-
-        # 2) 결과 문자열 생성 (네 기존 규칙 유지)
-        result_str = self._result_to_string(results) if results else ""
-
-        # 3) DB 저장 (db_path 있을 때만)
         if self.current_db_path:
             save_data = {
                 "read_num": read_num,
@@ -246,20 +255,153 @@ class ScanPipeline:
                 "path": image_path,
                 "sheet_code": sheet_code,
                 "mark_result": result_str,
-                "is_valid": 1 if status == "정상" else 0,
+                "is_valid": is_valid,
             }
             self.db.insert_scan_result(self.current_db_path, save_data)
 
-        # 4) UI row_data 반환
-        row_data = [
+        # 5) UI 반환 데이터
+        return [
             str(read_num),
             sheet_code,
             place,
             room,
-            status,
+            ui_status,
             "완료",
             result_str,
             image_path,
             os.path.basename(image_path),
         ]
-        return row_data
+
+    # --- 내부 로직: 사이드 마크 모드 ---
+    def _process_side_marker_mode(self, img):
+        """
+        status_code(OK/ERR), sheet_results(list), debug_img 반환
+        """
+        debug_img = img.copy()
+
+        markers = self.engine.find_side_markers(img) or []
+        if not isinstance(markers, list):
+            markers = []
+
+        # ✅ 마커는 cy 기준 정렬 (문항 매칭 안정화)
+        try:
+            markers = sorted(markers, key=lambda m: m.get("cy", 0))
+        except Exception:
+            pass
+
+        questions = self.form_data.get("questions", []) if isinstance(self.form_data, dict) else []
+        if not isinstance(questions, list) or len(questions) == 0:
+            # 질문이 없으면 의미가 없으므로 ERR 처리
+            return "ERR", [], debug_img
+
+        roi_params = self.form_data.get("roi_params", {}) if isinstance(self.form_data, dict) else {}
+        if not isinstance(roi_params, dict):
+            roi_params = {}
+
+        box_w = self._safe_int(roi_params.get("box_w", 40), 40)
+        box_h = self._safe_int(roi_params.get("box_h", 40), 40)
+        dist_agree = self._safe_int(roi_params.get("marker_to_agree_dist", 600), 600)
+        dist_disagree = self._safe_int(roi_params.get("marker_to_disagree_dist", 750), 750)
+
+        ratio_th = self._get_effective_ratio_threshold()
+
+        sheet_results = []
+        has_error = False
+
+        for i, q in enumerate(questions):
+            q_num = (q.get("no") if isinstance(q, dict) else None) or (i + 1)
+
+            # 마커 부족
+            if i >= len(markers):
+                sheet_results.append({"q_num": q_num, "marked": [], "status": "마커없음"})
+                has_error = True
+                continue
+
+            base_cx = self._safe_int(markers[i].get("cx", 0), 0)
+            base_cy = self._safe_int(markers[i].get("cy", 0), 0)
+            start_y = base_cy - (box_h // 2)
+
+            rois = [
+                (base_cx + dist_agree, start_y, box_w, box_h),      # 찬성(0)
+                (base_cx + dist_disagree, start_y, box_w, box_h),   # 반대(1)
+            ]
+
+            marked_indices = []
+            for idx, (rx, ry, rw, rh) in enumerate(rois):
+                clamped = self._clamp_roi(img, rx, ry, rw, rh)
+                if clamped is None:
+                    # ROI 자체가 이미지 밖이면 오류로 간주 (해당 문항은 공란 처리)
+                    has_error = True
+                    continue
+
+                cx, cy, cw, ch = clamped
+
+                # 엔진 점수 계산
+                score = self.engine.get_marking_score(img, cx, cy, cw, ch)
+
+                area = cw * ch
+                ratio = (score / area) if area > 0 else 0.0
+                is_marked = ratio > ratio_th
+
+                # 그리기
+                color = (0, 255, 0) if is_marked else (0, 0, 255)
+                cv2.rectangle(debug_img, (cx, cy), (cx + cw, cy + ch), color, 2)
+                cv2.putText(
+                    debug_img,
+                    f"{ratio:.3f}",
+                    (cx, max(0, cy - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
+
+                if is_marked:
+                    marked_indices.append(idx)
+
+            # 상태 판정
+            if len(marked_indices) == 0:
+                q_status = "공란"
+                has_error = True
+            elif len(marked_indices) > 1:
+                q_status = "중복"
+                has_error = True
+            else:
+                q_status = "정상"
+
+            sheet_results.append({"q_num": q_num, "marked": marked_indices, "status": q_status})
+
+        return ("ERR" if has_error else "OK"), sheet_results, debug_img
+
+    # --- 내부 로직: JSON 고정 좌표 모드 ---
+    def _process_json_fixed_mode(self, img):
+        """
+        status_code(OK/ERR), results, debug_img 반환
+        """
+        debug_img = img.copy()
+        try:
+            rois = build_rois_from_form(self.form_data)
+            if not rois:
+                return "ERR", [], debug_img
+
+            status, results, debug_img = self.engine.analyze_sheet_cv(img, rois, ref_anchor=None)
+            return self._status_to_code(status), results, debug_img
+        except Exception as e:
+            print(f"JSON fixed mode error: {e}")
+            print(traceback.format_exc())
+            return "ERR", [], debug_img
+
+    def _create_error_result(self, read_num, place, room, path, msg):
+        """에러 발생 시 반환할 더미 데이터"""
+        return [
+            str(read_num),
+            "Error",
+            place,
+            room,
+            "오류",
+            msg,
+            "00000",
+            path,
+            os.path.basename(path),
+        ]

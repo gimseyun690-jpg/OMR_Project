@@ -1,32 +1,31 @@
 {
-  "form_id": "OMR_V1_vote",
-  "display_name": "OMR_V1 (선거/찬반 5문항)",
-  "sheet_code": "OMR_V1",
-  "questions": 5,
+  "form_id": "OMR_Vote_2025",
+  "display_name": "정기총회 서면결의서 (하이브리드)",
   
-
-  "anchor": { "x": 100, "y": 500 },
+  "layout_mode": "side_marker", 
+  "_comment": "layout_mode: 'fixed'(절대좌표) 또는 'side_marker'(옆면마크기준)",
 
   "omr": {
-    "threshold": 140,
+    "threshold": 127,
     "pixel_ratio": 0.25
   },
 
-  "roi": {
-    "start_y": 515,
-    "gap_y": 90,
-    "w": 35,
-    "h": 35,
-    "agree_x": 1130,
-    "disagree_x": 1275
+  "#_comment_alignment": "alignment_marks가 비어있으면 투영 변환(펴기)을 건너뜁니다.",
+  "alignment_marks": null, 
+
+  "roi_params": {
+    "#_comment": "사이드 마크 기준일 때: 마크 중심에서 X축으로 얼마나 떨어져 있는지 설정",
+    "marker_to_agree_dist": 600,   
+    "marker_to_disagree_dist": 750, 
+    "box_w": 40,
+    "box_h": 40
   },
-  
-  "timing_marks": [
-  { "name": "TL", "x": 100,  "y": 500,  "w": 80, "h": 80 },
-  { "name": "TR", "x": 1300, "y": 500,  "w": 80, "h": 80 },
-  { "name": "BL", "x": 100,  "y": 1600, "w": 80, "h": 80 },
-  { "name": "BR", "x": 1300, "y": 1600, "w": 80, "h": 80 }
-]
 
-
+  "questions": [
+    { "no": 1, "type": "vote" },
+    { "no": 2, "type": "vote" },
+    { "no": 3, "type": "vote" },
+    { "no": 4, "type": "vote" },
+    { "no": 5, "type": "vote" }
+  ]
 }

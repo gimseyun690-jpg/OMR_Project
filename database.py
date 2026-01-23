@@ -1,6 +1,8 @@
 import sqlite3
 import os
+import getpass
 from datetime import datetime
+
 
 class DBManager:
     def __init__(self, master_db_name="omr_master.db"):
@@ -52,41 +54,97 @@ class DBManager:
         conn.close()
 
     def create_project_tables(self, db_path):
+        import sqlite3
+
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tblScanData (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                read_num INTEGER,           
-                scanner_name TEXT,          
-                room_no TEXT,               
-                image_path TEXT,            
-                sheet_code TEXT,            
-                mark_result TEXT,           
-                is_valid INTEGER DEFAULT 1, 
-                scan_time TEXT              
-            )
-        ''')
-        cursor.execute('CREATE TABLE IF NOT EXISTS tblSettings (key TEXT PRIMARY KEY, value TEXT)')
+
+        cursor.executescript("""
+        CREATE TABLE IF NOT EXISTS tblScanData (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            read_num INTEGER,
+            scanner_name TEXT,
+            room_no TEXT,
+            image_path TEXT,
+            sheet_code TEXT,
+            mark_result TEXT,
+            is_valid INTEGER DEFAULT 1,
+            scan_time TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS manual_edits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            read_num INTEGER NOT NULL,
+            image_path TEXT,
+            before_result TEXT,
+            after_result TEXT,
+            editor TEXT,
+            reason TEXT,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS tblSettings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_scan_readnum
+            ON tblScanData(read_num);
+
+        CREATE INDEX IF NOT EXISTS idx_manual_edits_readnum
+            ON manual_edits(read_num);
+        """)
+
         conn.commit()
         conn.close()
 
-    def insert_scan_result(self, db_path, data):
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        sql = '''
-            INSERT INTO tblScanData 
-            (read_num, scanner_name, room_no, image_path, scan_time, sheet_code, mark_result, is_valid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        '''
-        cursor.execute(sql, (
-            data['read_num'], data['place'], data['room'], data['path'], 
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            data.get('sheet_code', ''), data.get('mark_result', ''), data.get('is_valid', 1)
-        ))
-        conn.commit()
-        conn.close()
 
+    # 공통 연결 메서드 추가
+    def _get_conn(self, db_path):
+        return sqlite3.connect(db_path)
+
+    def connect(self, db_path):
+        return self._get_conn(db_path)
+
+    def insert_scan_result(self, db_path, data: dict):
+        """
+        tblScanData 저장
+        data keys: read_num, place, room, path, sheet_code, mark_result, is_valid
+        """
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO tblScanData
+                (read_num, scanner_name, room_no, image_path, sheet_code, mark_result, is_valid, scan_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                data.get("read_num"),
+                data.get("place"),
+                data.get("room"),
+                data.get("path"),
+                data.get("sheet_code"),
+                data.get("mark_result"),
+                data.get("is_valid", 1),
+                created_at,
+            ))
+            conn.commit()
+
+    def insert_manual_edit(self, db_path, read_num, image_path, before_result, after_result,
+                           editor=None, reason=None):
+        if editor is None:
+            editor = getpass.getuser()
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # with문을 사용하여 close를 자동으로 처리 (더 안전함)
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO manual_edits
+                (read_num, image_path, before_result, after_result, editor, reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (read_num, image_path, before_result, after_result, editor, reason, created_at))
+            conn.commit()
     # ========================================================
     # [추가] 데이터 수정 및 조회 기능 (완전판)
     # ========================================================
@@ -98,29 +156,54 @@ class DBManager:
         cursor.execute(sql, (mark_result, is_valid, read_num))
         conn.commit()
         conn.close()
-        
-    def insert_manual_edit(self, db_path, read_num, image_path, before_result, after_result,
-                       editor=None, reason=None):
-        import sqlite3
-        import getpass
-        from datetime import datetime
 
-        if editor is None:
-            editor = getpass.getuser()
-
-        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
+    def get_scan_by_read_num(self, db_path, read_num):
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO manual_edits
-            (read_num, image_path, before_result, after_result, editor, reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (read_num, image_path, before_result, after_result, editor, reason, created_at))
+        cursor.execute("SELECT * FROM tblScanData WHERE read_num = ?", (read_num,))
+        row = cursor.fetchone()
+        conn.close()
+        return row
 
+    def delete_scan_result(self, db_path, read_num):
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tblScanData WHERE read_num = ?", (read_num,))
         conn.commit()
         conn.close()
 
+    def update_scan_meta(self, db_path, read_num, scanner_name=None, room_no=None, image_path=None):
+        fields = []
+        values = []
+        if scanner_name is not None:
+            fields.append("scanner_name = ?")
+            values.append(scanner_name)
+        if room_no is not None:
+            fields.append("room_no = ?")
+            values.append(room_no)
+        if image_path is not None:
+            fields.append("image_path = ?")
+            values.append(image_path)
+        if not fields:
+            return
+        values.append(read_num)
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        sql = f"UPDATE tblScanData SET {', '.join(fields)} WHERE read_num = ?"
+        cursor.execute(sql, values)
+        conn.commit()
+        conn.close()
+
+    def renumber_read_nums(self, db_path, ordered_read_nums):
+        """
+        ordered_read_nums: [old_read_num, ...] 순서대로 1..N 부여
+        """
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        for new_num, old_num in enumerate(ordered_read_nums, start=1):
+            cursor.execute("UPDATE tblScanData SET read_num = ? WHERE read_num = ?", (new_num, old_num))
+        conn.commit()
+        conn.close()
 
     def get_all_scans(self, db_path):
         """모든 스캔 데이터 가져오기"""
@@ -209,3 +292,4 @@ class DBManager:
         cursor.execute("INSERT INTO tblSettings (key, value) VALUES (?, ?)", (key, str(value)))
         conn.commit()
         conn.close()
+
