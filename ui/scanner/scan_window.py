@@ -928,7 +928,12 @@ class ScannerReadingView(QWidget):
 
         # [수정] 분석 로직이 무겁다면 별도의 QRunnable 등을 사용하는 것이 좋으나, 
         # 우선 급한 대로 카운트 라벨이라도 정확히 수정합니다.
-        row_data = self.pipeline.process_image(...)
+        row_data = self.pipeline.process_image(
+            image_path=image_path,
+            read_num=self.total_read,
+            place=self.cb_place.currentText(),
+            room=self.cb_room.currentText(),
+        )
 
         self.main_grid.add_row_data(row_data)
 
