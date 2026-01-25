@@ -4,25 +4,26 @@ import numpy as np
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
                              QLabel, QFrame, QGroupBox, QComboBox, QSplitter,
                              QTableWidget, QHeaderView, QAbstractItemView, QMessageBox, QTableWidgetItem,
-                             QFileDialog, QProgressDialog, QCheckBox, QMenu, QInputDialog, QApplication)
-from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QThread
+                             QFileDialog, QProgressDialog, QCheckBox, QMenu, QInputDialog, QApplication, QDialog)
+from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QThread, QObject, QRunnable, QThreadPool, QTimer
+from PyQt5.QtGui import QPixmap, QImage
 
 
-# 기존 UI 컴포넌트 import (유지)
+# 기존 UI 컴포넌트 import
 from ui.scanner.components.control_panel import ControlPanel
 from ui.scanner.components.data_grid import DataGrid
 from logic.scanner_core import ScannerDevice
 
-# ★ 기능 연결을 위해 추가된 모듈
+# 추가 기능 연결을 위해 추가된 모듈
 from logic.omr_engine import OMREngine
 from database import DBManager
-from ui.scanner.popups.error_editor import ErrorCorrectionDialog # 팝업창
+from ui.scanner.popups.error_editor import ErrorCorrectionDialog  # 오류 수정 팝업
 from logic.pipeline import ScanPipeline
 from logic.form_loader import list_forms, load_form, build_rois_from_form, get_anchor_from_form, get_omr_params, get_sheet_code
 
 
 # =========================================================
-# [스캔 워커 스레드] - 백그라운드에서 스캐너 돌리기 (유지)
+# [스캔 워커 스레드 - 백그라운드에서 스캐너 처리(스캔)]
 # =========================================================
 class ScanWorker(QThread):
     image_scanned = pyqtSignal(str)
@@ -33,7 +34,7 @@ class ScanWorker(QThread):
     def __init__(self, hwnd, save_folder): 
         super().__init__()
         self.hwnd = hwnd
-        self.save_folder = save_folder # 경로 저장
+        self.save_folder = save_folder  # 경로 저장
         self.scanner = ScannerDevice()
         self.is_running = True
 
@@ -43,26 +44,26 @@ class ScanWorker(QThread):
             # 1. 연결
             success, msg = self.scanner.connect(self.hwnd)
             if not success:
-                self.error_occurred.emit(f"스캐너 연결 실패: {msg}")
+                self.error_occurred.emit(f"SCAN_ERR|CONNECT|1|0|스캐너 연결 실패: {msg}")
                 return
 
             # 2. 장비 열기
             success, msg = self.scanner.open_scanner()
             if not success:
-                self.error_occurred.emit(f"장비 열기 실패: {msg}")
+                self.error_occurred.emit(f"SCAN_ERR|OPEN|1|0|장비 열기 실패: {msg}")
                 return
 
-            # 3. 용지 확인
+            # 3. 급지 확인
             if not self.scanner.check_paper():
-                self.error_occurred.emit("급지대에 용지가 없습니다.")
+                self.error_occurred.emit("SCAN_ERR|NO_PAPER|0|0|급지대에 용지가 없습니다.")
                 return
 
-            # 4. scan 함수에 save_folder 전달
+            # 4. scan 후 save_folder 전달
             for image_path in self.scanner.scan(self.save_folder):
                 if not self.is_running: break
                 
-                # 여기서 바로 분석까지 해서 결과(dict 등)를 보낼 수도 있습니다.
-                # 혹은 단순히 경로만 보내고 메인에서 처리하려면 아래 process_image를 다른 스레드에 맡겨야 합니다.
+                # 여기서 바로 분석까지 해서 결과(dict)를 보낼 수도 있습니다.
+                # 현재는 경로만 보내고, 메인에서 처리하도록 process_image는 다른 스레드에 맡깁니다.
                 self.image_scanned.emit(image_path)
             
             self.scan_finished.emit()
@@ -104,7 +105,7 @@ class DemoWorker(QThread):
                 if self._cancel:
                     break
 
-                # 진행률 신호
+                # 진행 신호
                 self.progress.emit(idx, total, os.path.basename(path))
 
                 try:
@@ -119,7 +120,7 @@ class DemoWorker(QThread):
                     ok += 1
                 except Exception as e:
                     fail += 1
-                    # 데모는 실패해도 계속
+                    # 데모 실패여도 계속
                     print(f"[DEMO] 실패: {path} -> {e}")
 
             self.finished.emit(ok, fail)
@@ -128,8 +129,36 @@ class DemoWorker(QThread):
             self.error.emit(str(e))
 
 
+class AnalyzeSignals(QObject):
+    result = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+
+class AnalyzeTask(QRunnable):
+    def __init__(self, pipeline, image_path, read_num, place, room):
+        super().__init__()
+        self.pipeline = pipeline
+        self.image_path = image_path
+        self.read_num = read_num
+        self.place = place
+        self.room = room
+        self.signals = AnalyzeSignals()
+
+    def run(self):
+        try:
+            row_data = self.pipeline.process_image(
+                image_path=self.image_path,
+                read_num=self.read_num,
+                place=self.place,
+                room=self.room,
+            )
+            self.signals.result.emit(row_data)
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
+
 # =========================================================
-# [메인 스캔 화면] - 디자인은 원래대로 복구됨
+# [메인 스캔 화면]
 # =========================================================
 class ScannerReadingView(QWidget):
     closed_signal = pyqtSignal()
@@ -141,27 +170,35 @@ class ScannerReadingView(QWidget):
         super().__init__(parent)
 
 
-        # 내부 변수 초기화
+        # 초기 변수 초기화
         self.total_read = 0
         self.worker = None
+        self.session_start_read_num = 1
+        self.thread_pool = QThreadPool()
+        self.scan_in_progress = False
+        self.pending_results = {}
+        self.next_emit_read_num = 1
+        self.pending_analyze = 0
+        self.last_scan_params = None
+        self.last_error_code = ""
 
         self.pipeline = ScanPipeline()
 
-        # ★ 엔진 & DB 매니저 생성
+        # 엔진 & DB 매니저 생성
         self.engine = OMREngine()
         self.db = DBManager()
-        self.current_db_path = None # 현재 열린 DB 경로
+        self.current_db_path = None  # 현재 열려있는 DB 경로
         
-        # [중요] 기준점 좌표 (find.py로 잰 검은 네모 위치) - 필요시 수정하세요
+        # [중요] 기준 좌표 (find.py에서 검출한 타이밍 마크 위치) - 필요 시 조정
         self.ref_anchor = (100, 500) 
 
-        # UI 초기화 (원래 디자인 함수 호출)
+        # UI 초기화
         self.init_ui()
         self.connect_signals()
 
 
     # -------------------------------------------------------------------------
-    # [1] UI 디자인 (사용자님 원래 코드 100% 복구)
+        # [1] UI 작성
     # -------------------------------------------------------------------------
     def init_ui(self):
         main_layout = QVBoxLayout()
@@ -170,14 +207,14 @@ class ScannerReadingView(QWidget):
 
         # === 1. 상단 정보/설정 패널 ===
         top_frame = QFrame()
-        top_frame.setFixedHeight(120)
+        top_frame.setFixedHeight(140)
         top_frame.setStyleSheet("background-color: #F0F0F0; border-bottom: 1px solid #A0A0A0;")
         
         top_layout = QHBoxLayout(top_frame)
         top_layout.setContentsMargins(5, 5, 5, 5)
         top_layout.setSpacing(10)
 
-        # (1-1) 좌측: 카운터 그룹
+        # (1-1) 좌측: 카운트 그룹
         grp_cnt = QGroupBox()
         grp_cnt.setStyleSheet("background-color: white; border: 1px solid #999; border-radius: 3px;")
         grid_cnt = QGridLayout(grp_cnt)
@@ -200,17 +237,17 @@ class ScannerReadingView(QWidget):
         line = QFrame(); line.setFrameShape(QFrame.HLine); line.setStyleSheet("color: #ccc;")
         grid_cnt.addWidget(line, 2, 0, 1, 2)
 
-        # [수정] 현재 고사장/시험실 라벨 변수화
-        lbl_cur_title = QLabel("현재 고사장/시험실 판독매수", styleSheet="font-size:10px; font-weight:bold; color:#555; border:none;")
+        # [수정] 현재 고사장/시험실/판독매수 라벨 분리
+        lbl_cur_title = QLabel("현재 고사장/시험실/판독매수", styleSheet="font-size:10px; font-weight:bold; color:#555; border:none;")
         grid_cnt.addWidget(lbl_cur_title, 3, 0, 1, 2)
 
         sub_layout = QGridLayout()
-        sub_layout.addWidget(QLabel("현재 고사장 :", styleSheet="font-size:11px; border:none;"), 0, 0)
-        # ★ 여기를 변수(self.lbl_cur_place)로 변경
+        sub_layout.addWidget(QLabel("현재 고사장:", styleSheet="font-size:11px; border:none;"), 0, 0)
+        # 실시간 변경 라벨
         self.lbl_cur_place = QLabel("스캐너1", styleSheet="color:blue; font-weight:bold; border:none;")
         sub_layout.addWidget(self.lbl_cur_place, 0, 1)
         
-        sub_layout.addWidget(QLabel("현재 시험실 :", styleSheet="font-size:11px; border:none;"), 1, 0)
+        sub_layout.addWidget(QLabel("현재 시험실:", styleSheet="font-size:11px; border:none;"), 1, 0)
         self.lbl_cur_room = QLabel("1", styleSheet="color:blue; font-weight:bold; font-size:14px; border:none;")
         sub_layout.addWidget(self.lbl_cur_room, 1, 1)
 
@@ -219,6 +256,12 @@ class ScannerReadingView(QWidget):
         sub_layout.addWidget(self.lbl_cur_cnt, 0, 3, 2, 1)
 
         grid_cnt.addLayout(sub_layout, 4, 0, 1, 2)
+
+        # 상세 오류 카운트(고정 표시)
+        self.lbl_review_detail = QLabel("오류:0  중복:0  공백:0  명단미매칭:0  결시:0")
+        self.lbl_review_detail.setStyleSheet("font-size:10px; color:#666; border:none;")
+        self.lbl_review_detail.setAlignment(Qt.AlignCenter)
+        grid_cnt.addWidget(self.lbl_review_detail, 5, 0, 1, 2)
 
         # (1-2) 중앙: 설정
         grp_set = QGroupBox()
@@ -233,63 +276,71 @@ class ScannerReadingView(QWidget):
 
         self._forms = list_forms()
         if not self._forms:
-            self.cb_form.addItem("폼 없음 (resources/forms)", userData=None)
+            self.cb_form.addItem("없음 (resources/forms)", userData=None)
         else:
             for form_id, display, path in self._forms:
                 self.cb_form.addItem(display, userData=path)
 
         
-        # [수정] 스캐너 1~10 목록 채우기
+        # [수정] 스캐너1~10 목록 채우기
         self.cb_place = QComboBox(); self.cb_place.setStyleSheet(st_combo)
         for i in range(1, 11):
             self.cb_place.addItem(f"스캐너{i}")
 
-        # [수정] 시험실 1~100 목록 채우기
+        # [수정] 시험실 1~1000 목록 채우기
         self.cb_room = QComboBox(); self.cb_room.setStyleSheet(st_combo)
         for i in range(1, 1000):
             self.cb_room.addItem(str(i))
 
-        grid_set.addWidget(QLabel("스캔OMR양식 :", styleSheet=st_blue_lbl), 0, 0)
+        grid_set.addWidget(QLabel("스캔 OMR 양식 :", styleSheet=st_blue_lbl), 0, 0)
         grid_set.addWidget(self.cb_form, 0, 1)
-        grid_set.addWidget(QLabel("판독 고사장 :", styleSheet="font-weight:bold; border:none;"), 1, 0)
+        grid_set.addWidget(QLabel("판독 고사장:", styleSheet="font-weight:bold; border:none;"), 1, 0)
         grid_set.addWidget(self.cb_place, 1, 1)
-        grid_set.addWidget(QLabel("판독 시험실 :", styleSheet="font-weight:bold; border:none;"), 2, 0)
+        grid_set.addWidget(QLabel("판독 시험실:", styleSheet="font-weight:bold; border:none;"), 2, 0)
         grid_set.addWidget(self.cb_room, 2, 1)
 
-        # (1-3) 우측: 오류점검 (기존 유지)
-        grp_err = QGroupBox(" 오류점검")
-        grp_err.setStyleSheet("background-color: white; border: 1px solid #999; font-size: 11px;")
+        # (1-3) 우측: 오류처리
+        grp_err = QGroupBox("오류처리")
+        grp_err.setStyleSheet(
+            "QGroupBox { background-color: white; border: 1px solid #999; font-size: 11px; padding-top: 10px; }"
+            "QGroupBox::title { subcontrol-origin: padding; subcontrol-position: top left; padding: 0 6px; }"
+        )
+        grp_err.setMinimumWidth(260)
         grid_err = QGridLayout(grp_err)
-        self.cb_err_opt = QComboBox(); self.cb_err_opt.addItem("이미지오류(저장안함) 스캔시보기 / 표기오류 스캔완료후보기")
-        self.cb_stop_opt = QComboBox(); self.cb_stop_opt.addItem("모든오류 스캔중단")
-        grid_err.addWidget(QLabel("스캔시 오류점검창 보기 :", styleSheet="border:none;"), 0, 0)
+        self.cb_err_opt = QComboBox(); self.cb_err_opt.addItem("이미지 오류(미리보기/읽기오류 스캔완료보류)")
+        self.cb_stop_opt = QComboBox(); self.cb_stop_opt.addItem("모든 오류 스캔중단")
+        grid_err.addWidget(QLabel("스캔중 오류처리 보기 :", styleSheet="border:none;"), 0, 0)
         grid_err.addWidget(self.cb_err_opt, 0, 1)
-        grid_err.addWidget(QLabel("오류점검시 스캔중단 :", styleSheet="border:none;"), 1, 0)
+        grid_err.addWidget(QLabel("오류발생시 스캔중단 :", styleSheet="border:none;"), 1, 0)
         grid_err.addWidget(self.cb_stop_opt, 1, 1)
 
-        # (1-4) 우측 끝: 체크박스
-        grp_chk = QGroupBox("오류점검")
-        grp_chk.setStyleSheet("background-color: white; border: 1px solid #999; font-size: 11px;")
+        # (1-4) 우측 하단 체크박스
+        grp_chk = QGroupBox("오류필터")
+        grp_chk.setStyleSheet(
+            "QGroupBox { background-color: white; border: 1px solid #999; font-size: 11px; padding-top: 10px; }"
+            "QGroupBox::title { subcontrol-origin: padding; subcontrol-position: top left; padding: 0 6px; }"
+        )
+        grp_chk.setMinimumWidth(150)
         v_chk = QVBoxLayout(grp_chk)
         
-        # ★ [수정됨] 멤버 변수로 할당하여 상태를 읽을 수 있게 함
-        self.chk_all_blank = QCheckBox("전체공란 무효표 점검")
-        self.chk_etc_error = QCheckBox("기타 무효표 점검")
+        # [수정] 멤버 변수로 할당하여 상태 확인
+        self.chk_all_blank = QCheckBox("전체공백 무효처리")
+        self.chk_etc_error = QCheckBox("기타 무효처리")
         
-        # 기본값 체크
+        # 기본 체크
         self.chk_all_blank.setChecked(True)
         self.chk_etc_error.setChecked(True)
 
         v_chk.addWidget(self.chk_all_blank)
         v_chk.addWidget(self.chk_etc_error)
 
-        top_layout.addWidget(grp_cnt, 25)
-        top_layout.addWidget(grp_set, 30)
-        top_layout.addWidget(grp_err, 35)
-        top_layout.addWidget(grp_chk, 10) # grp_chk 추가
+        top_layout.addWidget(grp_cnt, 14)
+        top_layout.addWidget(grp_set, 34)
+        top_layout.addWidget(grp_err, 36)
+        top_layout.addWidget(grp_chk, 16) # grp_chk 추가
         main_layout.addWidget(top_frame)
 
-        # === 2. 하단 3단 분리 (기존 유지) ===
+        # === 2. 하단 3분할 ===
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(5)
         splitter.setStyleSheet("QSplitter::handle { background-color: #ccc; }")
@@ -320,12 +371,12 @@ class ScannerReadingView(QWidget):
         self.setLayout(main_layout)
 
     # -------------------------------------------------------------------------
-    # [2] 헬퍼 및 설정 함수 (로직 연결용)
+    # [2] 유틸/설정 함수
     # -------------------------------------------------------------------------
     # -------------------------------------------------------------------------
-    # [2] 핵심 로직: 오류 점검 창 띄우기 (Next/Prev 지원)
+    # [2] 핵심 로직: 오류 점검 창 (Next/Prev)
     # -------------------------------------------------------------------------
-    def open_error_check(self):
+    def open_error_check(self, auto_next: bool = False):
         """오류 점검 버튼 클릭 시 실행"""
         if not self.current_db_path: 
             return
@@ -334,7 +385,7 @@ class ScannerReadingView(QWidget):
         all_rows = self.db.get_all_scans(self.current_db_path)
         
         # 2. 필터링 (체크박스 상태 반영)
-        self.error_queue = [] # 점검할 대상 리스트 (Index가 아닌 Row 데이터 자체 저장)
+        self.error_queue = []  # Index가 아닌 Row 데이터 객체 리스트
 
         check_blank = self.chk_all_blank.isChecked()
         check_etc = self.chk_etc_error.isChecked()
@@ -343,12 +394,12 @@ class ScannerReadingView(QWidget):
             is_valid = row[7]      # 0:오류, 1:정상
             mark_result = row[6]   # "10302..."
             
-            # 이미 정상이면 패스 (단, 사용자가 원하면 정상도 포함 가능하지만 여기선 오류만)
+            # 정상이라면 스킵
             if is_valid == 1:
                 continue
 
             # 오류 유형 분석
-            is_blank_paper = (mark_result.replace('0', '') == '') # 0을 다 뺐는데 빈 문자열이면 백지
+            is_blank_paper = (mark_result.replace('0', '') == '')  # 전부 0이면 공백지
             
             if is_blank_paper and check_blank:
                 self.error_queue.append(row)
@@ -356,14 +407,21 @@ class ScannerReadingView(QWidget):
                 self.error_queue.append(row)
 
         if not self.error_queue:
-            QMessageBox.information(self, "완료", "점검할 오류 항목이 없습니다.\n(설정된 조건에 맞는 오류가 없음)")
+            QMessageBox.information(self, "완료", "점검할 오류가 없습니다.\n(설정 조건에 맞는 오류가 없음)")
             return
 
         # 3. 점검 루프 시작 (첫 번째 오류부터)
-        self.run_review_loop(0)
+        completed_all = self.run_review_loop(0)
+        if completed_all:
+            if auto_next and self.control_panel.chk_next.isChecked():
+                QMessageBox.information(self, "점검 완료", "점검이 끝났습니다. 다음 시험실로 이동합니다.")
+                self._advance_room()
+                self.start_scan()
+            else:
+                QMessageBox.information(self, "점검 완료", "점검이 끝났습니다.")
 
     def run_review_loop(self, start_idx):
-        """재귀적으로 또는 반복적으로 다이얼로그를 띄움"""
+        """오류들을 반복 점검하는 다이얼로그 루프"""
         current_idx = start_idx
         
         while 0 <= current_idx < len(self.error_queue):
@@ -377,10 +435,10 @@ class ScannerReadingView(QWidget):
             # "103" -> [{'q_num':1, 'marked':[0]}, ...] 변환
             scan_results = self.parse_result_string(result_str)
 
-            # (2) 이미지 로드 (한글 경로 지원)
+            # (2) 이미지 로드 (경로 직접)
             image_cv = None
             try:
-                # numpy로 읽어서 cv2로 디코딩 (한글 경로 에러 방지)
+                # numpy로 읽어 cv2 디코드 (한글 경로 오류 방지)
                 img_array = np.fromfile(image_path, np.uint8)
                 image_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             except Exception as e:
@@ -388,34 +446,36 @@ class ScannerReadingView(QWidget):
 
             # (3) 다이얼로그 실행
             dlg = ErrorCorrectionDialog(self, image_cv, scan_results, image_path)
-            dlg.lbl_idx.setText(f"{current_idx + 1} / {len(self.error_queue)}") # 순번 표시
+            session_total = max(0, self.total_read - self.session_start_read_num + 1)
+            dlg.lbl_idx.setText(f"{current_idx + 1}/{session_total}")  # 오류 순번/이번 고사실 읽은 장수
             
-            # exec_()는 창이 닫힐 때까지 대기함
+            # exec_()은 창이 닫힐 때까지 대기함
             dlg.exec_() 
 
             # (4) 종료 코드 확인 (Dialog에서 exit_code 설정 필요)
             exit_code = getattr(dlg, 'exit_code', 0)
 
-            if exit_code == 0: # 그냥 닫음 (X버튼) -> 루프 종료
+            if exit_code == 0:  # 그냥 닫음 (X버튼) -> 루프 종료
                 break
             
-            elif exit_code == 1: # 저장 후 (S) -> 다음으로
+            elif exit_code == 1:  # 저장(S) -> 다음으로
                 self.save_corrected_data(row, dlg.scan_results)
-                current_idx += 1 # 다음 자료
+                current_idx += 1  # 다음 이동
 
-            elif exit_code == 2: # 이전 (<) -> 저장 안 하고 이전으로
+            elif exit_code == 2:  # 이전 (<) -> 저장하지 않고 이전으로
                 current_idx -= 1
                 if current_idx < 0:
-                    QMessageBox.information(self, "알림", "첫 번째 자료입니다.")
+                    QMessageBox.information(self, "알림", "첫 번째 항목입니다.")
                     current_idx = 0
 
-            elif exit_code == 3: # 다음 (>) -> 저장 안 하고 다음으로
+            elif exit_code == 3:  # 다음 (>) -> 저장하지 않고 다음으로
                 current_idx += 1
 
-        # 루프 탈출 후 통계 갱신
+        # 루프 종료 후 통계 갱신
         self.update_statistics()
         if current_idx >= len(self.error_queue):
-             QMessageBox.information(self, "완료", "모든 오류 점검을 마쳤습니다!")
+             return True
+        return False
 
     def parse_result_string(self, result_str):
         """문자열 '103'을 다이얼로그용 리스트로 변환"""
@@ -429,9 +489,9 @@ class ScannerReadingView(QWidget):
             elif char == '3':                  # 중복
                 marked = [0, 1]
                 status = "중복"
-            elif char == '0':                  # 공란
+            elif char == '0':                  # 공백
                 marked = []
-                status = "공란"
+                status = "공백"
             
             parsed.append({'q_num': i+1, 'marked': marked, 'status': status})
         return parsed
@@ -459,14 +519,14 @@ class ScannerReadingView(QWidget):
             image_path=image_path,
             before_result=before_str,
             after_result=new_result_str,
-            reason="오류점검창 수정"
+            reason="오류수정(수동수정)"
         )
 
-        # 2. 원본 데이터 업데이트 (이제 유효표(1)가 됨)
+        # 2. 원본 데이터 업데이트 (강제 유효=1)
         self.db.update_scan_result(self.current_db_path, read_num, new_result_str, 1)
 
     def _item(self, text):
-        """테이블 아이템 생성 헬퍼"""
+        """아이템 데이터 생성 헬퍼"""
         item = QTableWidgetItem(text)
         item.setTextAlignment(Qt.AlignCenter)
         return item
@@ -522,7 +582,7 @@ class ScannerReadingView(QWidget):
         read_nums = self._get_selected_read_nums()
         if not read_nums or not self.current_db_path:
             return
-        msg = "선택한 행과 이미지 파일을 삭제할까요?" if delete_images else "선택한 행만 삭제할까요?"
+        msg = "선택한 결과와 이미지 파일을 삭제할까요?" if delete_images else "선택한 결과만 삭제할까요?"
         if QMessageBox.question(self, "삭제 확인", msg) != QMessageBox.Yes:
             return
         for rn in read_nums:
@@ -560,7 +620,7 @@ class ScannerReadingView(QWidget):
     def _change_front_path(self):
         read_nums = self._get_selected_read_nums()
         if len(read_nums) != 1 or not self.current_db_path:
-            QMessageBox.information(self, "안내", "한 행만 선택해주세요.")
+            QMessageBox.information(self, "안내", "한 건만 선택해주세요.")
             return
         new_path, _ = QFileDialog.getOpenFileName(self, "앞면 경로 변경", "", "Images (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)")
         if not new_path:
@@ -672,12 +732,12 @@ class ScannerReadingView(QWidget):
         if not self._get_selected_rows():
             return
         menu = QMenu(self)
-        act_review = menu.addAction("현재형 판독자료 조회/수정")
+        act_review = menu.addAction("현재건 판독결과 조회/수정")
         menu.addSeparator()
         act_copy = menu.addAction("복사")
         menu.addSeparator()
-        act_del_all = menu.addAction("행자료/이미지삭제")
-        act_del_row = menu.addAction("행자료만삭제(이미지제외)")
+        act_del_all = menu.addAction("전체자료+이미지 삭제")
+        act_del_row = menu.addAction("자료만 삭제(이미지 제외)")
         menu.addSeparator()
         act_place = menu.addAction("판독고사장 변경")
         act_room = menu.addAction("판독시험실 변경")
@@ -686,8 +746,8 @@ class ScannerReadingView(QWidget):
         act_back = menu.addAction("뒷면경로 변경")
         act_back.setEnabled(False)
         menu.addSeparator()
-        act_renum = menu.addAction("판독번호 판독시험실순으로 전체 새로부여")
-        act_rename = menu.addAction("이미지파일명 전체 새로부여")
+        act_renum = menu.addAction("판독번호 고사장/시험실 순으로 전체 재부여")
+        act_rename = menu.addAction("이미지파일명 전체 재부여")
         menu.addSeparator()
         act_find_start = menu.addAction("처음부터 찾기")
         act_find_next = menu.addAction("현재이후부터 찾기")
@@ -727,9 +787,9 @@ class ScannerReadingView(QWidget):
             QMessageBox.critical(self, "DB 오류", f"통계 갱신 중 오류:\n{e}")
 
 
-    # 1. 좌표 가져오는 함수 (DB 연동 버전으로 교체)
+    # 1. 좌표 가져오기 (DB 연동 버전)
     def get_rois(self):
-        """DB에서 좌표 설정을 불러와 ROIs 생성"""
+        """DB에서 좌표 설정값을 불러 ROIs 생성"""
         if not self.current_db_path:
             # DB가 없으면 기본값 반환
             return self.get_default_rois()
@@ -755,7 +815,7 @@ class ScannerReadingView(QWidget):
             return self.get_default_rois()
 
     def get_default_rois(self):
-        """안전장치: 기본 좌표"""
+        """기본 좌표"""
         w, h = 35, 35
         x_agree = 1130; x_disagree = 1275
         start_y = 515; gap_y = 90
@@ -766,7 +826,7 @@ class ScannerReadingView(QWidget):
         return rois
 
     # -------------------------------------------------------------------------
-    # [3] 이벤트 연결 및 핸들러 (버튼 동작)
+    # [3] 이벤트 연결 핸들러 (버튼 동작)
     # -------------------------------------------------------------------------
     def connect_signals(self):
         # 기존 버튼 연결
@@ -774,6 +834,9 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_scan.clicked.connect(self.start_scan)
         self.control_panel.btn_check.clicked.connect(self.open_error_check)
         self.control_panel.btn_demo.clicked.connect(self.run_demo_folder)
+        self.control_panel.btn_next.clicked.connect(self.scan_next_room)
+        self.control_panel.btn_stop.clicked.connect(self.stop_scan)
+        self.control_panel.btn_retry.clicked.connect(self.retry_last_scan)
 
         
         # [추가] 콤보박스 변경 시 상단 라벨 자동 업데이트
@@ -791,7 +854,7 @@ class ScannerReadingView(QWidget):
         self.closed_signal.emit()
 
     def run_demo_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "테스트 이미지 폴더 선택")
+        folder = QFileDialog.getExistingDirectory(self, "데모 이미지 폴더 선택")
         if not folder:
             return
 
@@ -807,14 +870,14 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_scan.setEnabled(False)
         self.control_panel.btn_check.setEnabled(False)
         self.control_panel.btn_demo.setEnabled(False)
-        self.control_panel.btn_demo.setText("데모 실행중...")
+        self.control_panel.btn_demo.setText("데모 진행중...")
 
         current_place = self.cb_place.currentText()
         current_room = self.cb_room.currentText()
 
-        # 진행률 다이얼로그
+        # 진행용 다이얼로그
         self.demo_progress = QProgressDialog("데모 판독 준비중...", "취소", 0, len(files), self)
-        self.demo_progress.setWindowTitle("데모 진행률")
+        self.demo_progress.setWindowTitle("데모 진행")
         self.demo_progress.setWindowModality(Qt.WindowModal)
         self.demo_progress.setAutoClose(False)
         self.demo_progress.setAutoReset(False)
@@ -849,6 +912,8 @@ class ScannerReadingView(QWidget):
         # UI에 결과 반영 (메인 스레드)
         self.main_grid.add_row_data(row_data)
         self.total_read = int(row_data[0])  # read_num 반영
+        if len(row_data) > 7 and hasattr(self.control_panel, "image_viewer"):
+            self.control_panel.image_viewer.set_image_path(row_data[7])
         self.lbl_total.setText(str(self.total_read))
         self.lbl_cur_cnt.setText(str(self.total_read))
         self.control_panel.txt_temp.setText(str(self.total_read))
@@ -869,6 +934,9 @@ class ScannerReadingView(QWidget):
         except Exception:
             pass
 
+        # 데모 종료 후 다음 시험실로 자동 이동
+        self._advance_room()
+
         QMessageBox.information(self, "데모 완료", f"성공 {ok} / 실패 {fail}")
 
     def _on_demo_error(self, msg):
@@ -888,13 +956,15 @@ class ScannerReadingView(QWidget):
     @pyqtSlot()
     def start_scan(self):
         """스캔 버튼 클릭 시"""
+        if self.scan_in_progress:
+            return
         if self.current_db_path is None:
-            QMessageBox.warning(self, "경고", "먼저 '파일 설정' 메뉴에서 사용할 DB 파일을 선택(열기)해주세요!")
+            QMessageBox.warning(self, "경고", "먼저 '파일 설정' 메뉴에서 사용할 DB 파일을 선택(열기)해 주세요!")
             return
         # [추가] DB에서 저장 경로 불러오기
         default_path = os.path.abspath(os.path.join("data", "scan_images"))
         save_folder = default_path
-        # DB 연결되어 있으면 설정값 가져옴, 없으면 기본값
+        # DB 설정값이 없으면 기본값 사용
         if self.current_db_path:
             save_folder = self.db.get_setting(self.current_db_path, "image_save_path", default_path)
             
@@ -906,8 +976,20 @@ class ScannerReadingView(QWidget):
                 QMessageBox.critical(self, "오류", f"폴더 생성 실패: {e}")
                 return
 
-        # [추가] 이번 스캔 세션(시험실)의 카운트 초기화
+        # [추가] 이번 스캔 세션 카운트 초기화
         self.current_session_count = 0
+        self.session_start_read_num = self.total_read + 1
+        self.pending_results = {}
+        self.next_emit_read_num = self.session_start_read_num
+        self.pending_analyze = 0
+        self.auto_next_pending = False
+
+        # 재시도 대비 설정 저장
+        self.last_scan_params = {
+            "form_index": self.cb_form.currentIndex(),
+            "place_index": self.cb_place.currentIndex(),
+            "room_index": self.cb_room.currentIndex(),
+        }
 
         my_hwnd = int(self.winId())
         # [수정] 워커 생성 시 save_folder 전달
@@ -919,104 +1001,102 @@ class ScannerReadingView(QWidget):
         
         self.control_panel.btn_scan.setEnabled(False)
         self.control_panel.btn_scan.setText("스캔중...")
+        self.control_panel.btn_next.setEnabled(False)
+        self.control_panel.btn_stop.setEnabled(True)
+        self.control_panel.btn_retry.setEnabled(False)
+        self.scan_in_progress = True
         self.worker.start()
 
     @pyqtSlot(str)
     def on_image_received(self, image_path):
         self.total_read += 1
-        self.current_session_count += 1 # 현재 시험실 카운트
+        self.current_session_count += 1  # 현재 시험실 카운트
 
-        # [수정] 분석 로직이 무겁다면 별도의 QRunnable 등을 사용하는 것이 좋으나, 
-        # 우선 급한 대로 카운트 라벨이라도 정확히 수정합니다.
-        row_data = self.pipeline.process_image(
+        if hasattr(self.control_panel, "image_viewer"):
+            self.control_panel.image_viewer.set_image_path(image_path)
+
+        task = AnalyzeTask(
+            pipeline=self.pipeline,
             image_path=image_path,
             read_num=self.total_read,
             place=self.cb_place.currentText(),
             room=self.cb_room.currentText(),
         )
+        self.pending_analyze += 1
+        task.signals.result.connect(self._on_analyze_result)
+        task.signals.error.connect(self._on_analyze_error)
+        self.thread_pool.start(task)
 
+    def _on_analyze_result(self, row_data):
+        self.pending_analyze = max(self.pending_analyze - 1, 0)
+        try:
+            read_num = int(row_data[0])
+        except Exception:
+            read_num = None
+
+        if read_num is None:
+            self._append_row(row_data)
+        else:
+            self.pending_results[read_num] = row_data
+            self._flush_pending_results()
+
+        if self.pending_analyze == 0:
+            self._maybe_start_auto_review()
+
+    def _on_analyze_error(self, msg):
+        self.pending_analyze = max(self.pending_analyze - 1, 0)
+        QMessageBox.warning(self, "오류", msg)
+        if self.pending_analyze == 0:
+            self._maybe_start_auto_review()
+
+    def _flush_pending_results(self):
+        while self.next_emit_read_num in self.pending_results:
+            row_data = self.pending_results.pop(self.next_emit_read_num)
+            self._append_row(row_data)
+            self.next_emit_read_num += 1
+
+    def _append_row(self, row_data):
+        if len(row_data) > 5 and row_data[5] == "타이밍 마크 오류입니다.":
+            self._show_timing_mark_error(row_data[7], row_data[5])
         self.main_grid.add_row_data(row_data)
-
         self.lbl_total.setText(str(self.total_read))        # 전체 누적
-        self.lbl_cur_cnt.setText(str(self.current_session_count)) # [변경] 현재 시험실만!
+        self.lbl_cur_cnt.setText(str(self.current_session_count))  # 현재 시험실만
         self.main_grid.scrollToBottom()
+
+    def _show_timing_mark_error(self, image_path, message):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("타이밍 마크 오류")
+        layout = QVBoxLayout(dlg)
+
+        lbl_msg = QLabel(message)
+        lbl_msg.setStyleSheet("font-size: 13px; font-weight: bold; color: #c00;")
+        layout.addWidget(lbl_msg)
+
+        img = None
+        try:
+            img_array = np.fromfile(image_path, np.uint8)
+            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        except Exception:
+            img = None
+
+        if img is not None:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            h, w = rgb.shape[:2]
+            bytes_per_line = w * 3
+            qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qimg)
+            max_w = 900
+            if pixmap.width() > max_w:
+                pixmap = pixmap.scaledToWidth(max_w, Qt.SmoothTransformation)
+            lbl_img = QLabel()
+            lbl_img.setPixmap(pixmap)
+            lbl_img.setAlignment(Qt.AlignCenter)
+            layout.addWidget(lbl_img)
+
+        dlg.resize(920, 600)
+        dlg.exec_()
     
 
-
-    # ---------------------------------------------------------
-    # [핵심] 오류 점검 및 수정 로직
-    # ---------------------------------------------------------
-    def open_error_check(self):
-        """오류(is_valid=0)인 항목을 찾아 팝업을 띄움"""
-        if not self.current_db_path: return
-
-        # 1. DB에서 모든 데이터 가져오기
-        all_rows = self.db.get_all_scans(self.current_db_path)
-        
-        # 2. 오류인 것만 찾기
-        error_row = None
-        for row in all_rows:
-            # row[7]이 is_valid (0이면 오류)
-            if row[7] == 0: 
-                error_row = row
-                break
-        
-        if not error_row:
-            QMessageBox.information(self, "알림", "점검할 오류 항목이 없습니다!")
-            return
-
-        # 3. 팝업 데이터 준비 (문자열 '103' -> 리스트 변환)
-        result_str = error_row[6]
-        scan_results = []
-        for i, char in enumerate(result_str):
-            marked = []
-            if char == '1': marked = [0]
-            elif char == '2': marked = [1]
-            elif char == '3': marked = [0, 1]
-            
-            status = "정상"
-            if char == '0': status = "공란"
-            elif char == '3': status = "중복"
-            
-            scan_results.append({'q_num': i+1, 'marked': marked, 'status': status})
-
-        # 4. 이미지 로드
-        import cv2
-        import numpy as np
-        try:
-            img_array = np.fromfile(error_row[4], np.uint8) 
-            image_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        except:
-            image_cv = None
-
-        # 5. 팝업 실행
-        dlg = ErrorCorrectionDialog(self, image_cv, scan_results, error_row[4])
-        if dlg.exec_():
-            # [저장 버튼 누름] -> 수정된 데이터 DB 업데이트
-            new_result_str = ""
-            for r in dlg.scan_results:
-                if len(r['marked']) == 0: val = "0"
-                elif len(r['marked']) > 1: val = "3"
-                elif 0 in r['marked']: val = "1"
-                elif 1 in r['marked']: val = "2"
-                new_result_str += val
-            
-            read_num = error_row[1]
-
-            before_result_str = error_row[6]
-            self.db.insert_manual_edit(
-                self.current_db_path,
-                read_num=read_num,
-                image_path=error_row[4],
-                before_result=before_result_str,
-                after_result=new_result_str,
-                reason="오류점검 팝업 수동 수정"
-            )
-
-            self.db.update_scan_result(self.current_db_path, read_num, new_result_str, 1) # 강제 유효(1)
-            
-            self.update_statistics()
-            QMessageBox.information(self, "완료", f"{read_num}번 자료가 수정되었습니다.")
 
     def update_statistics(self):
         """DB 통계(총매수, 오류매수) 갱신"""
@@ -1027,9 +1107,71 @@ class ScannerReadingView(QWidget):
         self.lbl_check.setText(str(error)) 
         self.control_panel.txt_temp.setText(str(total))
 
+    def update_review_summary(self):
+        if not self.current_db_path:
+            return
+        try:
+            rows = self.db.get_scans_in_range(self.current_db_path, self.session_start_read_num, self.total_read)
+            roster_rows = self.db.load_roster(self.current_db_path)
+        except Exception:
+            return
+
+        roster_by_exam = {str(r[0]).strip(): r for r in roster_rows if r and len(r) > 0}
+
+        start = self.session_start_read_num
+        end = self.total_read
+
+        total_in_session = 0
+        review_count = 0
+        blank_cnt = 0
+        dup_cnt = 0
+        invalid_cnt = 0
+        roster_missing_cnt = 0
+        absent_cnt = 0
+
+        for row in rows:
+            read_num = row[0]
+            total_in_session += 1
+
+            mark_result = str(row[1] or "")
+            is_valid = row[2]
+            exam_no = str(row[3] or "").strip()
+
+            needs_review = False
+            if is_valid == 0:
+                needs_review = True
+                invalid_cnt += 1
+            if "0" in mark_result or "3" in mark_result:
+                needs_review = True
+                if "3" in mark_result:
+                    dup_cnt += 1
+                if mark_result.replace("0", "") == "":
+                    blank_cnt += 1
+
+            lookup_key = exam_no if exam_no else str(read_num)
+            roster = roster_by_exam.get(lookup_key)
+            if roster is None:
+                needs_review = True
+                roster_missing_cnt += 1
+            else:
+                attendance = str(roster[6]).strip() if len(roster) > 6 else ""
+                if attendance and attendance in ("미응시", "결시", "불참", "N", "NO", "0"):
+                    needs_review = True
+                    absent_cnt += 1
+
+            if needs_review:
+                review_count += 1
+
+        if total_in_session > 0:
+            self.lbl_check.setText(f"{review_count}/{total_in_session}")
+            self.lbl_review_detail.setText(
+                f"오류:{invalid_cnt}  중복:{dup_cnt}  공백:{blank_cnt}  "
+                f"명단미매칭:{roster_missing_cnt}  결시:{absent_cnt}"
+            )
+
     @pyqtSlot()
     def on_finished(self):
-        # [기존 기능] 왼쪽 요약 테이블 추가
+        # [기존 기능] 좌측 요약 테이블 추가
         place = self.cb_place.currentText()
         room = self.cb_room.currentText()
         count = str(self.current_session_count)
@@ -1040,21 +1182,95 @@ class ScannerReadingView(QWidget):
         self.summary_table.setItem(row, 1, self._item(room))
         self.summary_table.setItem(row, 2, self._item(count))
         
-        # [수정] 시험실 번호 자동 증가 (콤보박스 인덱스 변경)
-        current_idx = self.cb_room.currentIndex()
-        # 다음 번호가 있으면(마지막 번호가 아니면) 하나 올림
-        if current_idx < self.cb_room.count() - 1:
-            self.cb_room.setCurrentIndex(current_idx + 1)
-            # 상단 파란색 라벨도 갱신
-            self.lbl_cur_room.setText(self.cb_room.currentText())
-
-        QMessageBox.information(self, "완료", f"{place} - {room} 시험실 스캔 완료\n(총 {count}매)")
-        self.reset_ui_state()
+        if self.control_panel.chk_next.isChecked():
+            QMessageBox.information(self, "완료", f"{place} - {room} 시험실 스캔 완료\n(총 {count}매)")
+            self.reset_ui_state()
+            self.control_panel.btn_retry.setEnabled(False)
+            self.update_review_summary()
+            self.auto_next_pending = True
+            self._maybe_start_auto_review()
+        else:
+            # [수정] 시험실 번호 자동 증가
+            self._advance_room()
+            QMessageBox.information(self, "완료", f"{place} - {room} 시험실 스캔 완료\n(총 {count}매)")
+            self.reset_ui_state()
+            self.control_panel.btn_retry.setEnabled(False)
+            self.update_review_summary()
     @pyqtSlot(str)
     def on_error(self, msg):
-        QMessageBox.warning(self, "오류", msg)
+        code, retryable, auto_retry, user_msg = self._parse_scan_error(msg)
+        self.last_error_code = code
+
+        if user_msg:
+            QMessageBox.warning(self, "오류", user_msg)
+        else:
+            QMessageBox.warning(self, "오류", msg)
+
+        if retryable:
+            self.control_panel.btn_retry.setEnabled(True)
+
         self.reset_ui_state()
+        if auto_retry and self.control_panel.chk_auto_retry.isChecked():
+            QTimer.singleShot(500, self.retry_last_scan)
 
     def reset_ui_state(self):
         self.control_panel.btn_scan.setEnabled(True)
         self.control_panel.btn_scan.setText("📄 현재시험실 스캔(R)")
+        self.control_panel.btn_next.setEnabled(True)
+        self.control_panel.btn_stop.setEnabled(True)
+        self.scan_in_progress = False
+
+    def scan_next_room(self):
+        if self.scan_in_progress:
+            return
+        self._advance_room()
+        self.start_scan()
+
+    def stop_scan(self):
+        if not self.scan_in_progress:
+            return
+        if self.worker:
+            try:
+                self.worker.stop()
+            except Exception:
+                pass
+        self.reset_ui_state()
+        QMessageBox.information(self, "중단", "스캔이 중단되었습니다.")
+
+    def retry_last_scan(self):
+        if self.scan_in_progress:
+            return
+        if not self.last_scan_params:
+            QMessageBox.information(self, "재시도", "이전 스캔 정보가 없습니다.")
+            return
+        try:
+            self.cb_form.setCurrentIndex(self.last_scan_params.get("form_index", 0))
+            self.cb_place.setCurrentIndex(self.last_scan_params.get("place_index", 0))
+            self.cb_room.setCurrentIndex(self.last_scan_params.get("room_index", 0))
+        except Exception:
+            pass
+        self.control_panel.btn_retry.setEnabled(False)
+        self.start_scan()
+
+    def _parse_scan_error(self, msg):
+        if not msg or not isinstance(msg, str):
+            return "", False, False, ""
+        if not msg.startswith("SCAN_ERR|"):
+            return "", False, False, ""
+        try:
+            _, code, retryable, auto_retry, user_msg = msg.split("|", 4)
+            return code, retryable == "1", auto_retry == "1", user_msg
+        except Exception:
+            return "", False, False, ""
+
+    def _maybe_start_auto_review(self):
+        if self.auto_next_pending and self.pending_analyze == 0:
+            self.auto_next_pending = False
+            self.open_error_check(auto_next=True)
+
+    def _advance_room(self):
+        current_idx = self.cb_room.currentIndex()
+        if current_idx < self.cb_room.count() - 1:
+            self.cb_room.setCurrentIndex(current_idx + 1)
+            # currentTextChanged 시그널로 라벨 자동 갱신
+            self.lbl_cur_room.setText(self.cb_room.currentText())

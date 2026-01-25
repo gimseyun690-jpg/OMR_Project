@@ -214,6 +214,9 @@ class ScanPipeline:
         status_code = "ERR"
         results = []
         debug_img = aligned_img.copy()
+        error_reason = ""
+        candidate_msg = ""
+        candidate_info = {}
 
         try:
             # [CASE A] JSON 폼이 선택된 경우
@@ -222,7 +225,7 @@ class ScanPipeline:
                 layout_mode = self.form_data.get("layout_mode", "fixed")
 
                 if layout_mode == "side_marker":
-                    status_code, results, debug_img = self._process_side_marker_mode(aligned_img)
+                    status_code, results, debug_img, error_reason = self._process_side_marker_mode(aligned_img)
                 else:
                     status_code, results, debug_img = self._process_json_fixed_mode(aligned_img)
 
@@ -238,10 +241,26 @@ class ScanPipeline:
             print(traceback.format_exc())
             status_code = "ERR"
 
-        # 4) 결과/저장
+        # 4) 수험정보 판독/비교 (선택)
+        cand_ok, cand_reason, cand_info = self._process_candidate_fields(aligned_img)
+        candidate_info = cand_info or {}
+        if not cand_ok:
+            status_code = "ERR"
+            if not error_reason:
+                error_reason = "CANDIDATE"
+                candidate_msg = cand_reason
+
+        # 5) 결과/저장
         result_str = self._result_to_string(results)
         ui_status = self._code_to_ui_status(status_code)
         is_valid = 1 if status_code == "OK" else 0
+
+        if status_code != "OK" and error_reason == "TIMING_MARK":
+            ui_message = "타이밍 마크 오류입니다."
+        elif status_code != "OK" and error_reason == "CANDIDATE":
+            ui_message = candidate_msg or "수험정보 불일치"
+        else:
+            ui_message = "완료"
 
         # 에러 시 debug 이미지 저장(옵션)
         if status_code != "OK":
@@ -256,17 +275,20 @@ class ScanPipeline:
                 "sheet_code": sheet_code,
                 "mark_result": result_str,
                 "is_valid": is_valid,
+                "exam_no": candidate_info.get("exam_no"),
+                "birth": candidate_info.get("birth"),
+                "subject": candidate_info.get("subject"),
             }
             self.db.insert_scan_result(self.current_db_path, save_data)
 
-        # 5) UI 반환 데이터
+        # 6) UI 반환 데이터
         return [
             str(read_num),
             sheet_code,
             place,
             room,
             ui_status,
-            "완료",
+            ui_message,
             result_str,
             image_path,
             os.path.basename(image_path),
@@ -275,7 +297,7 @@ class ScanPipeline:
     # --- 내부 로직: 사이드 마크 모드 ---
     def _process_side_marker_mode(self, img):
         """
-        status_code(OK/ERR), sheet_results(list), debug_img 반환
+        status_code(OK/ERR), sheet_results(list), debug_img, error_reason 반환
         """
         debug_img = img.copy()
 
@@ -292,7 +314,11 @@ class ScanPipeline:
         questions = self.form_data.get("questions", []) if isinstance(self.form_data, dict) else []
         if not isinstance(questions, list) or len(questions) == 0:
             # 질문이 없으면 의미가 없으므로 ERR 처리
-            return "ERR", [], debug_img
+            return "ERR", [], debug_img, ""
+
+        # 타이밍 마크(사이드 마크) 부족 시 즉시 오류 처리
+        if len(markers) < len(questions):
+            return "ERR", [], debug_img, "TIMING_MARK"
 
         roi_params = self.form_data.get("roi_params", {}) if isinstance(self.form_data, dict) else {}
         if not isinstance(roi_params, dict):
@@ -372,7 +398,174 @@ class ScanPipeline:
 
             sheet_results.append({"q_num": q_num, "marked": marked_indices, "status": q_status})
 
-        return ("ERR" if has_error else "OK"), sheet_results, debug_img
+        return ("ERR" if has_error else "OK"), sheet_results, debug_img, ""
+
+    # --- 수험정보 판독/비교 ---
+    def _process_candidate_fields(self, img):
+        if not isinstance(self.form_data, dict):
+            return True, "", {}
+        cand = self.form_data.get("candidate_fields")
+        if not isinstance(cand, dict):
+            return True, "", {}
+
+        debug_overlay = cand.get("debug_overlay", False)
+        if debug_overlay:
+            try:
+                dbg = self._draw_candidate_overlay(img, cand)
+                self._save_debug_if_needed(dbg, "candidate_overlay", "CANDIDATE")
+            except Exception:
+                pass
+
+        cand_info, cand_ok, cand_err = self._read_candidate_info(img, cand)
+        if not cand_ok:
+            return False, cand_err or "수험정보 판독 오류", cand_info
+
+        if not self.current_db_path:
+            return True, "", cand_info
+
+        try:
+            roster_rows = self.db.load_roster(self.current_db_path)
+        except Exception:
+            roster_rows = []
+
+        roster_by_exam = {str(r[0]).strip(): r for r in roster_rows if r and len(r) > 0}
+        roster = roster_by_exam.get(cand_info.get("exam_no", ""))
+        if roster is None:
+            return False, "수험정보 불일치", cand_info
+
+        birth = str(roster[2]).strip() if len(roster) > 2 else ""
+        subject = str(roster[3]).strip() if len(roster) > 3 else ""
+
+        if birth and cand_info.get("birth") and birth != cand_info.get("birth"):
+            return False, "수험정보 불일치", cand_info
+        if subject and cand_info.get("subject") and subject != cand_info.get("subject"):
+            return False, "수험정보 불일치", cand_info
+
+        return True, "", cand_info
+
+    def _read_candidate_info(self, img, cand):
+        info = {}
+        # 수험번호
+        exam_cfg = cand.get("exam_no")
+        if isinstance(exam_cfg, dict):
+            ok, val = self._decode_digit_grid(img, exam_cfg)
+            if not ok:
+                return {}, False, "수험번호 판독 오류"
+            info["exam_no"] = val
+
+        # 출생월일
+        birth_cfg = cand.get("birth")
+        if isinstance(birth_cfg, dict):
+            ok, val = self._decode_digit_grid(img, birth_cfg)
+            if not ok:
+                return {}, False, "출생월일 판독 오류"
+            info["birth"] = val
+
+        # 선택과목
+        subj_cfg = cand.get("subject")
+        if isinstance(subj_cfg, dict):
+            ok, val = self._decode_single_choice(img, subj_cfg)
+            if not ok:
+                return {}, False, "선택과목 판독 오류"
+            info["subject"] = val
+
+        return info, True, ""
+
+    def _decode_digit_grid(self, img, cfg):
+        grid = cfg.get("grid", {})
+        x = self._safe_int(grid.get("x", 0), 0)
+        y = self._safe_int(grid.get("y", 0), 0)
+        col_w = self._safe_int(grid.get("col_w", 20), 20)
+        row_h = self._safe_int(grid.get("row_h", 20), 20)
+        cols = self._safe_int(grid.get("cols", 0), 0)
+        rows = self._safe_int(grid.get("rows", 10), 10)
+        digits = self._safe_int(cfg.get("digits", cols), cols)
+
+        if img is None or digits <= 0 or rows <= 0 or col_w <= 0 or row_h <= 0:
+            return False, ""
+        H, W = img.shape[:2]
+        grid_w = digits * col_w
+        grid_h = rows * row_h
+        # 좌표가 이미지 밖으로 크게 벗어나면 즉시 실패
+        if x < 0 or y < 0 or x + grid_w > W or y + grid_h > H:
+            return False, ""
+
+        ratio_th = self._get_effective_ratio_threshold()
+        out = ""
+        for c in range(digits):
+            best = (-1, 0.0)  # (digit, ratio)
+            hits = 0
+            for r in range(rows):
+                rx = x + (c * col_w)
+                ry = y + (r * row_h)
+                score = self.engine.get_marking_score(img, rx, ry, col_w, row_h)
+                area = col_w * row_h
+                ratio = (score / area) if area > 0 else 0.0
+                if ratio > ratio_th:
+                    hits += 1
+                if ratio > best[1]:
+                    best = (r, ratio)
+            if hits != 1:
+                return False, ""
+            out += str(best[0])
+        return True, out
+
+    def _decode_single_choice(self, img, cfg):
+        choices = cfg.get("choices", [])
+        if not isinstance(choices, list) or not choices:
+            return False, ""
+        if img is None:
+            return False, ""
+        H, W = img.shape[:2]
+        ratio_th = self._get_effective_ratio_threshold()
+        picked = None
+        hits = 0
+        for ch in choices:
+            label = ch.get("label", "")
+            x = self._safe_int(ch.get("x", 0), 0)
+            y = self._safe_int(ch.get("y", 0), 0)
+            w = self._safe_int(ch.get("w", 20), 20)
+            h = self._safe_int(ch.get("h", 20), 20)
+            if x < 0 or y < 0 or x + w > W or y + h > H:
+                return False, ""
+            score = self.engine.get_marking_score(img, x, y, w, h)
+            area = w * h
+            ratio = (score / area) if area > 0 else 0.0
+            if ratio > ratio_th:
+                hits += 1
+                picked = label
+        if hits != 1:
+            return False, ""
+        return True, picked
+
+    def _draw_candidate_overlay(self, img, cand):
+        dbg = img.copy()
+        exam_cfg = cand.get("exam_no", {})
+        birth_cfg = cand.get("birth", {})
+        subj_cfg = cand.get("subject", {})
+
+        for cfg, color in ((exam_cfg, (0, 255, 255)), (birth_cfg, (0, 200, 255))):
+            grid = cfg.get("grid", {})
+            x = self._safe_int(grid.get("x", 0), 0)
+            y = self._safe_int(grid.get("y", 0), 0)
+            col_w = self._safe_int(grid.get("col_w", 20), 20)
+            row_h = self._safe_int(grid.get("row_h", 20), 20)
+            cols = self._safe_int(grid.get("cols", 0), 0)
+            rows = self._safe_int(grid.get("rows", 10), 10)
+            for c in range(cols):
+                for r in range(rows):
+                    rx = x + (c * col_w)
+                    ry = y + (r * row_h)
+                    cv2.rectangle(dbg, (rx, ry), (rx + col_w, ry + row_h), color, 1)
+
+        choices = subj_cfg.get("choices", [])
+        for ch in choices:
+            x = self._safe_int(ch.get("x", 0), 0)
+            y = self._safe_int(ch.get("y", 0), 0)
+            w = self._safe_int(ch.get("w", 20), 20)
+            h = self._safe_int(ch.get("h", 20), 20)
+            cv2.rectangle(dbg, (x, y), (x + w, y + h), (255, 0, 255), 2)
+        return dbg
 
     # --- 내부 로직: JSON 고정 좌표 모드 ---
     def _process_json_fixed_mode(self, img):

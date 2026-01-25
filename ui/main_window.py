@@ -13,6 +13,14 @@ from ui.scanner.scan_window import ScannerReadingView
 from ui.results.vote_count import VoteCountView
 from ui.results.scan_data import ScanDataView
 from ui.results.scan_stats import ScanStatsView
+from ui.results.roster_input import RosterInputView
+from ui.results.answer_input import AnswerInputView
+from ui.results.unread_check import UnreadCheckView
+from ui.results.scoring_calc import ScoringCalcView
+from ui.results.scoring_result import ScoringResultView
+from ui.results.site_status import SiteStatusView
+from ui.results.type_status import TypeStatusView
+from ui.results.item_analysis import ItemAnalysisView
 
 # ★ 3. [추가] 상세 설정 창들 Import
 from ui.settings.form_setting import FormSettingsDialog
@@ -67,6 +75,14 @@ class OMRScannerApp(QMainWindow):
             ("파일설정", "folder.png"),
             ("좌표설정", "coord_calibrator.png"),
             ("스캐너판독", "scanner.png"),
+            ("명단입력", "roster.png"),
+            ("정답입력", "answer.png"),
+            ("미판독확인", "unread.png"),
+            ("채점계산", "score.png"),
+            ("채점결과", "score_result.png"),
+            ("고사장현황", "site_status.png"),
+            ("전형별현황", "type_status.png"),
+            ("문항분석", "item_analysis.png"),
             ("개표결과", "vote.png"),
             ("판독자료", "excel.png"),
             ("판독매수", "chart.png"),
@@ -97,12 +113,28 @@ class OMRScannerApp(QMainWindow):
         self.vote_view = VoteCountView()
         self.data_view = ScanDataView()
         self.stats_view = ScanStatsView()
+        self.roster_view = RosterInputView()
+        self.answer_view = AnswerInputView()
+        self.unread_view = UnreadCheckView()
+        self.scoring_view = ScoringCalcView()
+        self.scoring_result_view = ScoringResultView()
+        self.site_status_view = SiteStatusView()
+        self.type_status_view = TypeStatusView()
+        self.item_analysis_view = ItemAnalysisView()
 
         self.stack.addWidget(self.home_widget)   # 0
         self.stack.addWidget(self.scanner_view)  # 1
         self.stack.addWidget(self.vote_view)     # 2
         self.stack.addWidget(self.data_view)     # 3
         self.stack.addWidget(self.stats_view)    # 4
+        self.stack.addWidget(self.roster_view)   # 5
+        self.stack.addWidget(self.answer_view)   # 6
+        self.stack.addWidget(self.unread_view)   # 7
+        self.stack.addWidget(self.scoring_view)  # 8
+        self.stack.addWidget(self.scoring_result_view)  # 9
+        self.stack.addWidget(self.site_status_view)     # 10
+        self.stack.addWidget(self.type_status_view)     # 11
+        self.stack.addWidget(self.item_analysis_view)   # 12
 
         self.setCentralWidget(self.stack)
 
@@ -149,6 +181,46 @@ class OMRScannerApp(QMainWindow):
             self.stats_view.set_db_path(current_db)
             self.stack.setCurrentIndex(4)
             self.statusbar.showMessage("고사장별 판독 매수 통계")
+
+        elif menu_name == "명단입력":
+            self.roster_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(5)
+            self.statusbar.showMessage("명단 입력")
+
+        elif menu_name == "정답입력":
+            self.answer_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(6)
+            self.statusbar.showMessage("정답 입력")
+
+        elif menu_name == "미판독확인":
+            self.unread_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(7)
+            self.statusbar.showMessage("미판독 확인")
+
+        elif menu_name == "채점계산":
+            self.scoring_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(8)
+            self.statusbar.showMessage("채점 계산")
+
+        elif menu_name == "채점결과":
+            self.scoring_result_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(9)
+            self.statusbar.showMessage("채점 결과")
+
+        elif menu_name == "고사장현황":
+            self.site_status_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(10)
+            self.statusbar.showMessage("고사장 현황")
+
+        elif menu_name == "전형별현황":
+            self.type_status_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(11)
+            self.statusbar.showMessage("전형별 현황")
+
+        elif menu_name == "문항분석":
+            self.item_analysis_view.set_db_path(current_db)
+            self.stack.setCurrentIndex(12)
+            self.statusbar.showMessage("문항 분석")
 
         else:
             self.stack.setCurrentIndex(0)

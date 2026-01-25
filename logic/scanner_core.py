@@ -35,6 +35,20 @@ class ScannerDevice:
         self.sm = None      # Source Manager
         self.source = None  # Scanner Source
         self.win_dir = os.environ.get('WINDIR', 'C:\\Windows')
+        self.double_feed_enabled = False
+        self.scanner_name = ""
+
+        # 스캐너별 예외 메시지 키워드 보정(필요 시 추가)
+        self._scanner_keyword_map = {
+            "FUJITSU": ["doublefeed", "double feed", "multi feed", "multifeed", "doublefeed"],
+            "EPSON": ["doublefeed", "double feed", "multi feed", "multifeed", "doublefeed"],
+            "RICOH": ["doublefeed", "double feed", "multi feed", "multifeed", "doublefeed"],
+            "CANON": ["doublefeed", "double feed", "multi feed", "multifeed", "doublefeed"],
+        }
+
+        # TWAIN condition code -> (code, message)
+        self._cc_map = {}
+        self._build_cc_map()
 
     def connect(self, hwnd):
         """TWAIN 드라이버 연결"""
@@ -56,7 +70,13 @@ class ScannerDevice:
         try:
             self.source = self.sm.OpenSource()
             if self.source:
-                return True, self.source.GetSourceName()
+                # 이중 급지 감지(가능한 드라이버에서만 설정됨)
+                self._try_enable_double_feed()
+                try:
+                    self.scanner_name = self.source.GetSourceName() or ""
+                except Exception:
+                    self.scanner_name = ""
+                return True, self.scanner_name if self.scanner_name else "스캐너"
             return False, "스캐너 선택 취소"
         except Exception as e:
             return False, str(e)
@@ -107,6 +127,9 @@ class ScannerDevice:
             self.source.RequestAcquire(0, 0)
         except twain.exc.DSTransferCancelled:
             return
+        except Exception as e:
+            code, msg, retryable, auto_retry = self._classify_exception(e)
+            raise RuntimeError(self._pack_error(code, msg, retryable, auto_retry))
 
         # 3) 전송 루프
         try:
@@ -134,9 +157,8 @@ class ScannerDevice:
                 # 전송 취소 시에도 핸들이 넘어왔다면 해제해야 함
                 pass 
             except Exception as e:
-                print(f"전송 오류: {e}")
-                # 오류가 나도 다음 장을 위해 break 대신 continue를 고려할 수도 있음 (상황에 따라)
-                break
+                code, msg, retryable, auto_retry = self._classify_exception(e)
+                raise RuntimeError(self._pack_error(code, msg, retryable, auto_retry))
             finally:
                 # ★ 핵심: 성공하든 실패하든 핸들을 받았다면 무조건 해제
                 if handle:
@@ -148,6 +170,101 @@ class ScannerDevice:
                 info = self.source.GetImageInfo()
             except:
                 break
+
+    def _try_enable_double_feed(self):
+        """드라이버가 지원하면 이중 급지 감지를 활성화"""
+        if not self.source:
+            return
+        try:
+            # CAP_DOUBLEFEEDDETECTION (많은 스캐너에서 지원)
+            self.source.SetCapability(twain.CAP_DOUBLEFEEDDETECTION, twain.TWTY_UINT16, 1)
+            # CAP_DOUBLEFEEDDETECTIONRESPONSE (가능하면 스캔 중단)
+            try:
+                self.source.SetCapability(twain.CAP_DOUBLEFEEDDETECTIONRESPONSE, twain.TWTY_UINT16, 2)
+            except Exception:
+                pass
+            self.double_feed_enabled = True
+        except Exception:
+            self.double_feed_enabled = False
+
+    def _build_cc_map(self):
+        """TWAIN condition code 매핑 구성(존재하는 상수만 등록)"""
+        def _add_cc(name, code, msg):
+            if code is not None:
+                self._cc_map[code] = (name, msg)
+
+        _add_cc("DF", getattr(twain, "TWCC_DOUBLEFEED", None), "이중 급지 감지됨: 용지를 확인한 뒤 다시 스캔하세요.")
+        _add_cc("JAM", getattr(twain, "TWCC_PAPERJAM", None), "용지 걸림(잼) 발생: 스캐너 내부를 확인하세요.")
+        _add_cc("COVER", getattr(twain, "TWCC_PAPERLIGHT", None), "커버 열림/용지 감지 문제: 스캐너 상태를 확인하세요.")
+        _add_cc("NO_PAPER", getattr(twain, "TWCC_NODS", None), "급지대에 용지가 없습니다.")
+        _add_cc("BAD_PAPER", getattr(twain, "TWCC_BADVALUE", None), "용지/설정 값 오류: 스캐너 설정을 확인하세요.")
+        _add_cc("OPERATION", getattr(twain, "TWCC_OPERATIONERROR", None), "스캐너 동작 오류가 발생했습니다.")
+        _add_cc("BUSY", getattr(twain, "TWCC_BUSY", None), "스캐너가 사용 중입니다. 잠시 후 다시 시도하세요.")
+        _add_cc("MEMORY", getattr(twain, "TWCC_LOWMEMORY", None), "메모리 부족으로 스캔 실패.")
+        _add_cc("FORMAT", getattr(twain, "TWCC_BADFORMAT", None), "전송 포맷 오류로 스캔 실패.")
+
+    def _pack_error(self, code, msg, retryable, auto_retry):
+        return f"SCAN_ERR|{code}|{1 if retryable else 0}|{1 if auto_retry else 0}|{msg}"
+
+    def _get_condition_code(self):
+        """TWAIN 상태 코드 조회(지원하는 드라이버만)"""
+        if not self.source:
+            return None
+        try:
+            status = self.source.GetStatus()
+        except Exception:
+            return None
+
+        if isinstance(status, (tuple, list)):
+            for v in reversed(status):
+                if isinstance(v, int):
+                    return v
+        if isinstance(status, int):
+            return status
+        return None
+
+    def _match_scanner_keywords(self, msg_lower: str) -> bool:
+        if not msg_lower:
+            return False
+        name = (self.scanner_name or "").upper()
+        for key, words in self._scanner_keyword_map.items():
+            if key in name:
+                for w in words:
+                    if w in msg_lower:
+                        return True
+        return False
+
+    def _classify_exception(self, e):
+        """스캐너 예외를 코드/메시지로 분류"""
+        msg = str(e)
+        msg_lower = msg.lower()
+
+        # 1) TWAIN condition code 우선
+        cc = self._get_condition_code()
+        if cc is not None and cc in self._cc_map:
+            code, user_msg = self._cc_map[cc]
+            retryable = code not in ("DF", "JAM", "NO_PAPER", "COVER")
+            auto_retry = code in ("BUSY",)
+            return code, user_msg, retryable, auto_retry
+
+        # 2) 메시지 키워드 기반 분류
+        if "double" in msg_lower or "multi" in msg_lower or "multifeed" in msg_lower or "doublefeed" in msg_lower:
+            return "DF", "이중 급지 감지됨: 용지를 확인한 뒤 다시 스캔하세요.", False, False
+        if self._match_scanner_keywords(msg_lower):
+            return "DF", "이중 급지 감지됨: 용지를 확인한 뒤 다시 스캔하세요.", False, False
+        if "jam" in msg_lower:
+            return "JAM", "용지 걸림(잼) 발생: 스캐너 내부를 확인하세요.", False, False
+        if "cover" in msg_lower or "open" in msg_lower:
+            return "COVER", "커버 열림/장치 커버를 확인하세요.", False, False
+        if "no paper" in msg_lower or "empty" in msg_lower or "no feeder" in msg_lower:
+            return "NO_PAPER", "급지대에 용지가 없습니다.", False, False
+        if "busy" in msg_lower:
+            return "BUSY", "스캐너가 사용 중입니다. 잠시 후 다시 시도하세요.", True, True
+        if "cancel" in msg_lower:
+            return "CANCEL", "사용자에 의해 스캔이 취소되었습니다.", False, False
+
+        # 3) 알 수 없는 오류
+        return "UNKNOWN", f"스캐너 오류: {msg}", True, False
 
     # ---------------------------
     # DIB -> BMP 저장 (정확 버전)

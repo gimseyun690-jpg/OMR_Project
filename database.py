@@ -69,7 +69,40 @@ class DBManager:
             sheet_code TEXT,
             mark_result TEXT,
             is_valid INTEGER DEFAULT 1,
-            scan_time TEXT
+            scan_time TEXT,
+            exam_no TEXT,
+            birth TEXT,
+            subject TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS tblRoster (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            exam_no TEXT,
+            name TEXT,
+            birth TEXT,
+            subject TEXT,
+            school TEXT,
+            room TEXT,
+            attendance TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS tblAnswer (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            q_num INTEGER,
+            answer TEXT,
+            score REAL
+        );
+
+        CREATE TABLE IF NOT EXISTS tblScoreResult (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            exam_no TEXT,
+            name TEXT,
+            correct_cnt INTEGER,
+            score REAL,
+            grade TEXT,
+            note TEXT,
+            scoring_mode TEXT,
+            created_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS manual_edits (
@@ -101,7 +134,14 @@ class DBManager:
 
     # 공통 연결 메서드 추가
     def _get_conn(self, db_path):
-        return sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=3000;")
+        except Exception:
+            pass
+        return conn
 
     def connect(self, db_path):
         return self._get_conn(db_path)
@@ -114,10 +154,11 @@ class DBManager:
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self._get_conn(db_path) as conn:
             cur = conn.cursor()
+            self._ensure_scan_columns(conn)
             cur.execute("""
                 INSERT INTO tblScanData
-                (read_num, scanner_name, room_no, image_path, sheet_code, mark_result, is_valid, scan_time)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (read_num, scanner_name, room_no, image_path, sheet_code, mark_result, is_valid, scan_time, exam_no, birth, subject)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data.get("read_num"),
                 data.get("place"),
@@ -127,8 +168,52 @@ class DBManager:
                 data.get("mark_result"),
                 data.get("is_valid", 1),
                 created_at,
+                data.get("exam_no"),
+                data.get("birth"),
+                data.get("subject"),
             ))
             conn.commit()
+
+    def _ensure_scan_columns(self, conn):
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(tblScanData)")
+        cols = {row[1] for row in cur.fetchall()}
+        for name, col_type in (("exam_no", "TEXT"), ("birth", "TEXT"), ("subject", "TEXT")):
+            if name not in cols:
+                cur.execute(f"ALTER TABLE tblScanData ADD COLUMN {name} {col_type}")
+        conn.commit()
+
+    def _ensure_roster_columns(self, conn):
+        cur = conn.cursor()
+        cur.execute("PRAGMA table_info(tblRoster)")
+        cols = {row[1] for row in cur.fetchall()}
+        if not cols:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tblRoster (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    exam_no TEXT,
+                    name TEXT,
+                    birth TEXT,
+                    subject TEXT,
+                    school TEXT,
+                    room TEXT,
+                    attendance TEXT
+                )
+            """)
+            conn.commit()
+            return
+        for name, col_type in (
+            ("exam_no", "TEXT"),
+            ("name", "TEXT"),
+            ("birth", "TEXT"),
+            ("subject", "TEXT"),
+            ("school", "TEXT"),
+            ("room", "TEXT"),
+            ("attendance", "TEXT"),
+        ):
+            if name not in cols:
+                cur.execute(f"ALTER TABLE tblRoster ADD COLUMN {name} {col_type}")
+        conn.commit()
 
     def insert_manual_edit(self, db_path, read_num, image_path, before_result, after_result,
                            editor=None, reason=None):
@@ -209,7 +294,22 @@ class DBManager:
         """모든 스캔 데이터 가져오기"""
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
+        self._ensure_scan_columns(conn)
         cursor.execute("SELECT * FROM tblScanData ORDER BY read_num ASC")
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+    def get_scans_in_range(self, db_path, start_read_num, end_read_num):
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        self._ensure_scan_columns(conn)
+        cursor.execute("""
+            SELECT read_num, mark_result, is_valid, exam_no
+            FROM tblScanData
+            WHERE read_num BETWEEN ? AND ?
+            ORDER BY read_num ASC
+        """, (start_read_num, end_read_num))
         rows = cursor.fetchall()
         conn.close()
         return rows
@@ -292,4 +392,166 @@ class DBManager:
         cursor.execute("INSERT INTO tblSettings (key, value) VALUES (?, ?)", (key, str(value)))
         conn.commit()
         conn.close()
+
+    # ========================================================
+    # [추가] 명단/정답 입력 저장 및 조회
+    # ========================================================
+    def save_roster(self, db_path, rows):
+        """rows: list of (exam_no, name, birth, subject, school, room, attendance)"""
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            self._ensure_roster_columns(conn)
+            cur.execute("DELETE FROM tblRoster")
+            cur.executemany(
+                "INSERT INTO tblRoster (exam_no, name, birth, subject, school, room, attendance) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+
+    def load_roster(self, db_path):
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            self._ensure_roster_columns(conn)
+            cur.execute("SELECT exam_no, name, birth, subject, school, room, attendance FROM tblRoster ORDER BY id ASC")
+            return cur.fetchall()
+
+    def save_answers(self, db_path, rows):
+        """rows: list of (q_num, answer, score)"""
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tblAnswer (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    q_num INTEGER,
+                    answer TEXT,
+                    score REAL
+                )
+            """)
+            cur.execute("DELETE FROM tblAnswer")
+            cur.executemany(
+                "INSERT INTO tblAnswer (q_num, answer, score) VALUES (?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+
+    def load_answers(self, db_path):
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tblAnswer (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    q_num INTEGER,
+                    answer TEXT,
+                    score REAL
+                )
+            """)
+            cur.execute("SELECT q_num, answer, score FROM tblAnswer ORDER BY q_num ASC")
+            return cur.fetchall()
+
+    # ========================================================
+    # [추가] 채점 결과 저장 및 조회
+    # ========================================================
+    def save_score_results(self, db_path, rows, scoring_mode):
+        """rows: list of (exam_no, name, correct_cnt, score, grade, note)"""
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tblScoreResult (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    exam_no TEXT,
+                    name TEXT,
+                    correct_cnt INTEGER,
+                    score REAL,
+                    grade TEXT,
+                    note TEXT,
+                    scoring_mode TEXT,
+                    created_at TEXT
+                )
+            """)
+            cur.execute("DELETE FROM tblScoreResult")
+            cur.executemany(
+                "INSERT INTO tblScoreResult (exam_no, name, correct_cnt, score, grade, note, scoring_mode, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [(r[0], r[1], r[2], r[3], r[4], r[5], scoring_mode, created_at) for r in rows],
+            )
+            conn.commit()
+
+    def load_score_results(self, db_path):
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tblScoreResult (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    exam_no TEXT,
+                    name TEXT,
+                    correct_cnt INTEGER,
+                    score REAL,
+                    grade TEXT,
+                    note TEXT,
+                    scoring_mode TEXT,
+                    created_at TEXT
+                )
+            """)
+            cur.execute("""
+                SELECT exam_no, name, correct_cnt, score, grade, note, scoring_mode, created_at
+                FROM tblScoreResult
+                ORDER BY id ASC
+            """)
+            return cur.fetchall()
+
+    # ========================================================
+    # [추가] 문항 분석 캐시
+    # ========================================================
+    def get_analysis_signature(self, db_path):
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*), MAX(scan_time) FROM tblScanData")
+            scan_cnt, scan_max = cur.fetchone()
+            cur.execute("SELECT COUNT(*), MAX(id) FROM tblAnswer")
+            ans_cnt, ans_max = cur.fetchone()
+            cur.execute("SELECT COUNT(*), MAX(id) FROM tblScoreResult")
+            score_cnt, score_max = cur.fetchone()
+        return f"scan:{scan_cnt}|{scan_max}|ans:{ans_cnt}|{ans_max}|score:{score_cnt}|{score_max}"
+
+    def save_item_analysis(self, db_path, rows):
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tblItemAnalysis (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    q_num INTEGER,
+                    answer TEXT,
+                    correct_rate TEXT,
+                    difficulty TEXT,
+                    discrimination TEXT,
+                    note TEXT
+                )
+            """)
+            cur.execute("DELETE FROM tblItemAnalysis")
+            cur.executemany(
+                "INSERT INTO tblItemAnalysis (q_num, answer, correct_rate, difficulty, discrimination, note) VALUES (?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+
+    def load_item_analysis(self, db_path):
+        with self._get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS tblItemAnalysis (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    q_num INTEGER,
+                    answer TEXT,
+                    correct_rate TEXT,
+                    difficulty TEXT,
+                    discrimination TEXT,
+                    note TEXT
+                )
+            """)
+            cur.execute("""
+                SELECT q_num, answer, correct_rate, difficulty, discrimination, note
+                FROM tblItemAnalysis
+                ORDER BY q_num ASC
+            """)
+            return cur.fetchall()
 

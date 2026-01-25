@@ -31,7 +31,7 @@ def main():
     # 글씨가 너무 크면 10, 적당하면 11로 하세요
     font = QFont("Malgun Gothic", 10) 
     app.setFont(font)
-    
+
     # 4. 메인 윈도우 생성 및 표시
     window = OMRScannerApp()
     window.showMaximized() # 시작할 때 전체화면으로

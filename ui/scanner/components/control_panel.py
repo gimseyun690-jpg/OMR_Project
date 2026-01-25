@@ -1,6 +1,7 @@
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QCheckBox, 
                              QGroupBox, QLineEdit, QLabel, QFrame, QHBoxLayout, QSpacerItem, QSizePolicy)
 from PyQt5.QtCore import Qt
+from ui.scanner.components.image_viewer import ImageViewer
 
 class ControlPanel(QWidget):
     def __init__(self):
@@ -48,12 +49,17 @@ class ControlPanel(QWidget):
         self.btn_check = QPushButton("✔️ 오류미확인 점검(A)"); self.btn_check.setStyleSheet(style_green)
         self.btn_next = QPushButton("▶ 다음시험실 스캔(N)"); self.btn_next.setStyleSheet(style_blue)
         self.btn_demo = QPushButton("📂 테스트 이미지 불러오기")
+        self.btn_stop = QPushButton("⏹ 스캔중단/종료(E)"); self.btn_stop.setStyleSheet(style_red)
+        self.btn_retry = QPushButton("↻ 재시도(T)"); self.btn_retry.setStyleSheet(style_blue)
+        self.btn_retry.setEnabled(False)
 
         
         layout.addWidget(self.btn_scan)
         layout.addWidget(self.btn_check)
         layout.addWidget(self.btn_next)
         layout.addWidget(self.btn_demo)
+        layout.addWidget(self.btn_stop)
+        layout.addWidget(self.btn_retry)
 
 
         # ----------------------------------------------------
@@ -63,6 +69,11 @@ class ControlPanel(QWidget):
         self.chk_next.setStyleSheet("color: blue; font-weight: bold; font-size: 11px;")
         self.chk_next.setChecked(True)
         layout.addWidget(self.chk_next)
+
+        self.chk_auto_retry = QCheckBox("오류시 자동 재시도")
+        self.chk_auto_retry.setStyleSheet("color: #444; font-weight: bold; font-size: 11px;")
+        self.chk_auto_retry.setChecked(False)
+        layout.addWidget(self.chk_auto_retry)
 
         # ----------------------------------------------------
         # 3. 닫기 버튼
@@ -104,7 +115,9 @@ class ControlPanel(QWidget):
         # ----------------------------------------------------
         grp_prev = QGroupBox("이전 임시판독매수 보관(좌측이 최근)")
         grp_prev.setStyleSheet("font-size: 10px; border: 1px solid #ccc;")
+        grp_prev.setMinimumHeight(70)
         v_prev = QVBoxLayout(grp_prev)
+        v_prev.setContentsMargins(5, 5, 5, 5)
         txt_prev = QLineEdit()
         txt_prev.setReadOnly(True)
         v_prev.addWidget(txt_prev)
@@ -115,23 +128,12 @@ class ControlPanel(QWidget):
         # ----------------------------------------------------
         layout.addStretch(1) # 빈 공간 채우기
         
-        self.preview_frame = QFrame()
-        self.preview_frame.setFrameShape(QFrame.StyledPanel)
-        self.preview_frame.setFixedSize(200, 250) # 세로로 긴 미리보기
-        # 체크무늬 패턴 스타일 (CSS로 구현)
-        self.preview_frame.setStyleSheet("""
-            background-color: #eee;
-            background-image: linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%, #ccc),
-                              linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%, #ccc);
-            background-size: 20px 20px;
-            background-position: 0 0, 10px 10px;
-            border: 1px solid #888;
-        """)
+        self.image_viewer = ImageViewer(width=200, height=210)
         
         # 중앙 정렬을 위한 레이아웃
         h_preview = QHBoxLayout()
         h_preview.addStretch(1)
-        h_preview.addWidget(self.preview_frame)
+        h_preview.addWidget(self.image_viewer)
         h_preview.addStretch(1)
         
         layout.addLayout(h_preview)

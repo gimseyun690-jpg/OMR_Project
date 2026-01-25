@@ -42,8 +42,8 @@ class ErrorCorrectionDialog(QDialog):
         top_layout = QHBoxLayout(top_panel)
         top_layout.setContentsMargins(5, 5, 5, 5)
 
-        # (1-1) 자료순번
-        grp_idx = QGroupBox("자료순번")
+        # (1-1) 점검 진행
+        grp_idx = QGroupBox("점검 진행")
         grp_idx.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #aaa; background: white; }")
         grid_idx = QVBoxLayout(grp_idx)
         self.lbl_idx = QLabel("1") # 나중에 실제 순번으로 교체 가능
