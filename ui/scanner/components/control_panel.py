@@ -1,7 +1,53 @@
 from PySide2.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QCheckBox, 
-                             QGroupBox, QLineEdit, QLabel, QFrame, QHBoxLayout, QSpacerItem, QSizePolicy)
-from PySide2.QtCore import Qt
+                             QGroupBox, QLineEdit, QLabel, QFrame, QHBoxLayout, QSpacerItem, QSizePolicy,
+                             QGraphicsDropShadowEffect)
+from PySide2.QtCore import Qt, QPointF, QPropertyAnimation, QEasingCurve
 from ui.scanner.components.image_viewer import ImageViewer
+
+class HoverShadowButton(QPushButton):
+    def __init__(self, text: str):
+        super().__init__(text)
+        self.setAttribute(Qt.WA_Hover, True)
+        self._init_shadow()
+
+    def _init_shadow(self):
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setBlurRadius(8)
+        self._shadow.setOffset(0, 1)
+        self._shadow.setColor(Qt.black)
+        self.setGraphicsEffect(self._shadow)
+
+        self._shadow_anim = QPropertyAnimation(self._shadow, b"blurRadius", self)
+        self._shadow_anim.setDuration(140)
+        self._shadow_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        self._offset_anim = QPropertyAnimation(self._shadow, b"offset", self)
+        self._offset_anim.setDuration(140)
+        self._offset_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    def enterEvent(self, event):
+        self._shadow_anim.stop()
+        self._shadow_anim.setStartValue(self._shadow.blurRadius())
+        self._shadow_anim.setEndValue(16)
+        self._shadow_anim.start()
+
+        self._offset_anim.stop()
+        self._offset_anim.setStartValue(self._shadow.offset())
+        self._offset_anim.setEndValue(QPointF(0, 3))
+        self._offset_anim.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._shadow_anim.stop()
+        self._shadow_anim.setStartValue(self._shadow.blurRadius())
+        self._shadow_anim.setEndValue(8)
+        self._shadow_anim.start()
+
+        self._offset_anim.stop()
+        self._offset_anim.setStartValue(self._shadow.offset())
+        self._offset_anim.setEndValue(QPointF(0, 1))
+        self._offset_anim.start()
+        super().leaveEvent(event)
 
 class ControlPanel(QWidget):
     def __init__(self):
@@ -45,12 +91,12 @@ class ControlPanel(QWidget):
             QPushButton:hover { background: #FFCDD2; }
         """
 
-        self.btn_scan = QPushButton("📄 현재시험실 스캔(R)"); self.btn_scan.setStyleSheet(style_blue)
-        self.btn_check = QPushButton("✔️ 오류미확인 점검(A)"); self.btn_check.setStyleSheet(style_green)
-        self.btn_next = QPushButton("▶ 다음시험실 스캔(N)"); self.btn_next.setStyleSheet(style_blue)
-        self.btn_demo = QPushButton("📂 테스트 이미지 불러오기")
-        self.btn_stop = QPushButton("⏹ 스캔중단/종료(E)"); self.btn_stop.setStyleSheet(style_red)
-        self.btn_retry = QPushButton("↻ 재시도(T)"); self.btn_retry.setStyleSheet(style_blue)
+        self.btn_scan = HoverShadowButton("📄 현재시험실 스캔(R)"); self.btn_scan.setStyleSheet(style_blue)
+        self.btn_check = HoverShadowButton("✔️ 오류미확인 점검(A)"); self.btn_check.setStyleSheet(style_green)
+        self.btn_next = HoverShadowButton("▶ 다음시험실 스캔(N)"); self.btn_next.setStyleSheet(style_blue)
+        self.btn_demo = HoverShadowButton("📂 테스트 이미지 불러오기")
+        self.btn_stop = HoverShadowButton("⏹ 스캔중단/종료(E)"); self.btn_stop.setStyleSheet(style_red)
+        self.btn_retry = HoverShadowButton("↻ 재시도(T)"); self.btn_retry.setStyleSheet(style_blue)
         self.btn_retry.setEnabled(False)
 
         
@@ -79,7 +125,7 @@ class ControlPanel(QWidget):
         # 3. 닫기 버튼
         # ----------------------------------------------------
         layout.addSpacing(5)
-        self.btn_close = QPushButton("🚪 닫기(C)"); self.btn_close.setStyleSheet(style_red)
+        self.btn_close = HoverShadowButton("🚪 닫기(C)"); self.btn_close.setStyleSheet(style_red)
         layout.addWidget(self.btn_close)
 
         # ----------------------------------------------------
@@ -102,7 +148,7 @@ class ControlPanel(QWidget):
         h_input.addWidget(self.txt_temp)
         v_temp.addLayout(h_input)
         
-        btn_reset = QPushButton("🗑️ 임시판독매수 초기화(I)")
+        btn_reset = HoverShadowButton("🗑️ 임시판독매수 초기화(I)")
         btn_reset.setStyleSheet("""
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E3F2FD, stop:1 #90CAF9);
             border: 1px solid #64B5F6; border-radius: 3px; font-weight: bold;

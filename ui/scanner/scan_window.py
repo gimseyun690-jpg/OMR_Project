@@ -181,6 +181,7 @@ class ScannerReadingView(QWidget):
         self.pending_analyze = 0
         self.last_scan_params = None
         self.last_error_code = ""
+        self.show_error_popups = True
 
         self.pipeline = ScanPipeline()
 
@@ -195,6 +196,17 @@ class ScannerReadingView(QWidget):
         # UI 초기화
         self.init_ui()
         self.connect_signals()
+
+    def set_error_popups_enabled(self, enabled: bool):
+        self.show_error_popups = bool(enabled)
+
+    def _show_error_popup(self, title: str, message: str, critical: bool = False):
+        if not self.show_error_popups:
+            return
+        if critical:
+            QMessageBox.critical(self, title, message)
+        else:
+            QMessageBox.warning(self, title, message)
 
 
     # -------------------------------------------------------------------------
@@ -948,7 +960,7 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_demo.setEnabled(True)
         self.control_panel.btn_demo.setText("📂 테스트 이미지 불러오기")
 
-        QMessageBox.critical(self, "데모 오류", msg)
+        self._show_error_popup("데모 오류", msg, critical=True)
 
 
 
@@ -1045,7 +1057,7 @@ class ScannerReadingView(QWidget):
 
     def _on_analyze_error(self, msg):
         self.pending_analyze = max(self.pending_analyze - 1, 0)
-        QMessageBox.warning(self, "오류", msg)
+        self._show_error_popup("오류", msg)
         if self.pending_analyze == 0:
             self._maybe_start_auto_review()
 
@@ -1202,9 +1214,9 @@ class ScannerReadingView(QWidget):
         self.last_error_code = code
 
         if user_msg:
-            QMessageBox.warning(self, "오류", user_msg)
+            self._show_error_popup("오류", user_msg)
         else:
-            QMessageBox.warning(self, "오류", msg)
+            self._show_error_popup("오류", msg)
 
         if retryable:
             self.control_panel.btn_retry.setEnabled(True)

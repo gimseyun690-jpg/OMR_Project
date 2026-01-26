@@ -18,8 +18,22 @@ plugin_path = os.path.join(os.path.dirname(PySide2.__file__), "Qt", "plugins")
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = plugin_path
 # ========================================================
 
-from PySide2.QtWidgets import QApplication
+from PySide2.QtWidgets import QApplication, QMessageBox
 from PySide2.QtGui import QFont
+
+# Fluent Widgets 의존성 확인
+try:
+    import qfluentwidgets  # noqa: F401
+except Exception:
+    app = QApplication(sys.argv)
+    QMessageBox.critical(
+        None,
+        "의존성 누락",
+        "PySide2-Fluent-Widgets가 설치되어 있지 않습니다.\n"
+        "requirements.txt 설치 후 다시 실행해주세요.\n"
+        "예) pip install -r requirements.txt",
+    )
+    sys.exit(1)
 
 # 우리가 만든 메인 화면 가져오기
 from ui.main_window import OMRScannerApp
