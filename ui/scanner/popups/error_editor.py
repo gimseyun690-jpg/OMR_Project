@@ -1,15 +1,15 @@
 import cv2
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+from PySide2.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                              QTableWidget, QTableWidgetItem, QPushButton, 
                              QHeaderView, QSplitter, QCheckBox, QWidget, 
                              QAbstractItemView, QGroupBox, QGridLayout, QFrame, QMessageBox)
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap, QImage, QColor, QFont
+from PySide2.QtCore import Qt, Signal
+from PySide2.QtGui import QPixmap, QImage, QColor, QFont
 
 class ErrorCorrectionDialog(QDialog):
     # 메인 윈도우에게 "다음/이전 파일 보여줘"라고 요청하는 신호
-    request_next = pyqtSignal()
-    request_prev = pyqtSignal()
+    request_next = Signal()
+    request_prev = Signal()
 
     def __init__(self, parent=None, image_cv=None, scan_results=None, image_path=""):
         super().__init__(parent)
@@ -334,3 +334,4 @@ class ErrorCorrectionDialog(QDialog):
     def resizeEvent(self, event):
         self.update_image()
         super().resizeEvent(event)
+

@@ -555,3 +555,4 @@ class DBManager:
             """)
             return cur.fetchall()
 
+

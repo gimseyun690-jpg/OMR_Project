@@ -265,3 +265,4 @@ class OMREngine:
 
         final_status = "오류" if has_error else "정상"
         return final_status, sheet_results, debug_img
+

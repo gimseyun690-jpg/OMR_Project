@@ -1,9 +1,9 @@
-from PyQt5.QtWidgets import (
+from PySide2.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
     QGridLayout, QTableWidget, QHeaderView, QPushButton,
     QTableWidgetItem, QLineEdit, QSpinBox, QCheckBox
 )
-from PyQt5.QtCore import Qt
+from PySide2.QtCore import Qt
 from database import DBManager
 
 
@@ -231,3 +231,4 @@ class VoteCountView(QWidget):
         item.setTextAlignment(Qt.AlignCenter)
         item.setFlags(item.flags() | Qt.ItemIsEditable)
         return item
+

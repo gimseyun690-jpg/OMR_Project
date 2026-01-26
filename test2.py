@@ -2,16 +2,16 @@ import sys
 import os
 
 # ========================================================
-# [중요] 32비트/64비트 PyQt5 플러그인 경로 강제 지정
+# [중요] 32비트/64비트 PySide2 플러그인 경로 강제 지정
 # (이 코드가 없으면 "Could not find the Qt platform plugin" 오류 발생)
 # ========================================================
-import PyQt5
-plugin_path = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "plugins")
+import PySide2
+plugin_path = os.path.join(os.path.dirname(PySide2.__file__), "Qt", "plugins")
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = plugin_path
 # ========================================================
 
 import cv2
-from PyQt5.QtWidgets import QApplication
+from PySide2.QtWidgets import QApplication
 from logic.omr_engine import OMREngine
 from ui.scanner.popups.error_editor import ErrorCorrectionDialog
 

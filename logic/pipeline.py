@@ -598,3 +598,4 @@ class ScanPipeline:
             path,
             os.path.basename(path),
         ]
+

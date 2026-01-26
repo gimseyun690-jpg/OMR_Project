@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QHBoxLayout, 
+from PySide2.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QHBoxLayout, 
                              QLabel, QSpinBox, QPushButton, QMessageBox, QGroupBox)
 from database import DBManager
 

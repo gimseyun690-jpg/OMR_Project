@@ -1,5 +1,5 @@
-from PyQt5.QtWidgets import QGroupBox, QLabel, QGridLayout, QFrame
-from PyQt5.QtCore import Qt
+from PySide2.QtWidgets import QGroupBox, QLabel, QGridLayout, QFrame
+from PySide2.QtCore import Qt
 
 class InfoPanel(QGroupBox):
     def __init__(self):

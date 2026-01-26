@@ -1,12 +1,12 @@
 import os
 import cv2
 import numpy as np
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
+from PySide2.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
                              QLabel, QFrame, QGroupBox, QComboBox, QSplitter,
                              QTableWidget, QHeaderView, QAbstractItemView, QMessageBox, QTableWidgetItem,
                              QFileDialog, QProgressDialog, QCheckBox, QMenu, QInputDialog, QApplication, QDialog)
-from PyQt5.QtCore import Qt, pyqtSlot, pyqtSignal, QThread, QObject, QRunnable, QThreadPool, QTimer
-from PyQt5.QtGui import QPixmap, QImage
+from PySide2.QtCore import Qt, Slot, Signal, QThread, QObject, QRunnable, QThreadPool, QTimer
+from PySide2.QtGui import QPixmap, QImage
 
 
 # 기존 UI 컴포넌트 import
@@ -26,9 +26,9 @@ from logic.form_loader import list_forms, load_form, build_rois_from_form, get_a
 # [스캔 워커 스레드 - 백그라운드에서 스캐너 처리(스캔)]
 # =========================================================
 class ScanWorker(QThread):
-    image_scanned = pyqtSignal(str)
-    scan_finished = pyqtSignal()
-    error_occurred = pyqtSignal(str)
+    image_scanned = Signal(str)
+    scan_finished = Signal()
+    error_occurred = Signal(str)
 
     # __init__에서 save_folder 인자 추가
     def __init__(self, hwnd, save_folder): 
@@ -76,10 +76,10 @@ class ScanWorker(QThread):
     def stop(self):
         self.is_running = False
 class DemoWorker(QThread):
-    progress = pyqtSignal(int, int, str)   # current, total, filename
-    result_row = pyqtSignal(list)          # row_data
-    finished = pyqtSignal(int, int)        # ok, fail
-    error = pyqtSignal(str)
+    progress = Signal(int, int, str)   # current, total, filename
+    result_row = Signal(list)          # row_data
+    finished = Signal(int, int)        # ok, fail
+    error = Signal(str)
 
     def __init__(self, pipeline, files, place, room, start_read_num):
         super().__init__()
@@ -130,8 +130,8 @@ class DemoWorker(QThread):
 
 
 class AnalyzeSignals(QObject):
-    result = pyqtSignal(list)
-    error = pyqtSignal(str)
+    result = Signal(list)
+    error = Signal(str)
 
 
 class AnalyzeTask(QRunnable):
@@ -161,7 +161,7 @@ class AnalyzeTask(QRunnable):
 # [메인 스캔 화면]
 # =========================================================
 class ScannerReadingView(QWidget):
-    closed_signal = pyqtSignal()
+    closed_signal = Signal()
 
     def set_project_db(self, db_path):
          self.set_current_db(db_path)
@@ -953,7 +953,7 @@ class ScannerReadingView(QWidget):
 
 
 
-    @pyqtSlot()
+    @Slot()
     def start_scan(self):
         """스캔 버튼 클릭 시"""
         if self.scan_in_progress:
@@ -1007,7 +1007,7 @@ class ScannerReadingView(QWidget):
         self.scan_in_progress = True
         self.worker.start()
 
-    @pyqtSlot(str)
+    @Slot(str)
     def on_image_received(self, image_path):
         self.total_read += 1
         self.current_session_count += 1  # 현재 시험실 카운트
@@ -1169,7 +1169,7 @@ class ScannerReadingView(QWidget):
                 f"명단미매칭:{roster_missing_cnt}  결시:{absent_cnt}"
             )
 
-    @pyqtSlot()
+    @Slot()
     def on_finished(self):
         # [기존 기능] 좌측 요약 테이블 추가
         place = self.cb_place.currentText()
@@ -1196,7 +1196,7 @@ class ScannerReadingView(QWidget):
             self.reset_ui_state()
             self.control_panel.btn_retry.setEnabled(False)
             self.update_review_summary()
-    @pyqtSlot(str)
+    @Slot(str)
     def on_error(self, msg):
         code, retryable, auto_retry, user_msg = self._parse_scan_error(msg)
         self.last_error_code = code
@@ -1274,3 +1274,4 @@ class ScannerReadingView(QWidget):
             self.cb_room.setCurrentIndex(current_idx + 1)
             # currentTextChanged 시그널로 라벨 자동 갱신
             self.lbl_cur_room.setText(self.cb_room.currentText())
+

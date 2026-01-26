@@ -6,13 +6,13 @@ import numpy as np
 import traceback
 from typing import Optional, List, Tuple, Dict
 
-from PyQt5.QtWidgets import (
+from PySide2.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFileDialog,
     QComboBox, QTextEdit, QMessageBox, QCheckBox, QGroupBox, QFormLayout,
     QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QSizePolicy
 )
-from PyQt5.QtCore import Qt, QEvent
-from PyQt5.QtGui import QPixmap, QImage
+from PySide2.QtCore import Qt, QEvent
+from PySide2.QtGui import QPixmap, QImage
 
 # ---- project imports ----
 from logic.form_loader import list_forms, load_form
@@ -868,3 +868,4 @@ class CoordCalibratorDialog(QDialog):
         except Exception:
             self._log(traceback.format_exc())
             QMessageBox.critical(self, "오류", "저장 중 오류")
+

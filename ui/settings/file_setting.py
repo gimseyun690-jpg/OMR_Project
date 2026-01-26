@@ -1,13 +1,13 @@
 import os
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
+from PySide2.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QTableWidget, QTableWidgetItem, QHeaderView, 
                              QMessageBox, QLineEdit, QLabel, QGroupBox, QFileDialog)
-from PyQt5.QtCore import pyqtSignal, Qt
+from PySide2.QtCore import Signal, Qt
 from database import DBManager # 방금 만든 DB매니저 불러오기
 
 class FileSettingsDialog(QDialog):
     # 메인 화면으로 "나 이 파일 선택했어!"라고 알려주는 신호
-    db_selected_signal = pyqtSignal(str, str) # (경로, 제목)
+    db_selected_signal = Signal(str, str) # (경로, 제목)
 
     def __init__(self, parent=None):
         super().__init__(parent)

@@ -1,6 +1,6 @@
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QCheckBox, 
+from PySide2.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QCheckBox, 
                              QGroupBox, QLineEdit, QLabel, QFrame, QHBoxLayout, QSpacerItem, QSizePolicy)
-from PyQt5.QtCore import Qt
+from PySide2.QtCore import Qt
 from ui.scanner.components.image_viewer import ImageViewer
 
 class ControlPanel(QWidget):
@@ -139,3 +139,4 @@ class ControlPanel(QWidget):
         layout.addLayout(h_preview)
 
         self.setLayout(layout)
+

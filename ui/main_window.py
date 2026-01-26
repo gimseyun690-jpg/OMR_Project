@@ -1,9 +1,9 @@
 import sys
 import os
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QAction, 
+from PySide2.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QAction,
                              QStatusBar, QToolBar, QStackedWidget, QMessageBox, QLabel)
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QIcon
+from PySide2.QtCore import Qt
+from PySide2.QtGui import QIcon
 
 # 1. 기존 화면 및 설정
 from ui.settings.file_setting import FileSettingsDialog
@@ -266,3 +266,4 @@ class OMRScannerApp(QMainWindow):
         db_path = self.get_current_db()
         if db_path:
             SiteSettingsDialog(self, db_path).exec_()
+

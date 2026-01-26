@@ -1,5 +1,5 @@
-from PyQt5.QtWidgets import QTableWidget, QHeaderView, QAbstractItemView, QTableWidgetItem
-from PyQt5.QtCore import Qt
+from PySide2.QtWidgets import QTableWidget, QHeaderView, QAbstractItemView, QTableWidgetItem
+from PySide2.QtCore import Qt
 
 class DataGrid(QTableWidget):
     def __init__(self):
@@ -44,3 +44,4 @@ class DataGrid(QTableWidget):
             item = QTableWidgetItem(str(text))
             item.setTextAlignment(Qt.AlignCenter)
             self.setItem(row, i, item)
+

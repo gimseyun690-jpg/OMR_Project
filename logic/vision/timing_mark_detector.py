@@ -113,3 +113,4 @@ def detect_timing_marks(img_bgr: np.ndarray) -> Tuple[Dict[str, Point], Dict]:
     debug['ok'] = True
     debug['corners'] = final_pts
     return final_pts, debug
+

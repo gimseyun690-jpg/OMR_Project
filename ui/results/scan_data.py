@@ -1,6 +1,6 @@
-from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QTableWidget, QHeaderView, 
+from PySide2.QtWidgets import (QWidget, QVBoxLayout, QTableWidget, QHeaderView, 
                              QTableWidgetItem, QPushButton, QHBoxLayout, QLabel)
-from PyQt5.QtCore import Qt
+from PySide2.QtCore import Qt
 from database import DBManager
 
 class ScanDataView(QWidget):

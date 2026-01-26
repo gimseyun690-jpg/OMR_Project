@@ -362,3 +362,4 @@ class ScannerDevice:
 
         finally:
             GlobalUnlock(handle)
+

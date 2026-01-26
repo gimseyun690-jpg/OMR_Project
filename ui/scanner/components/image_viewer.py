@@ -1,9 +1,9 @@
 import os
 import cv2
 import numpy as np
-from PyQt5.QtWidgets import QWidget, QLabel, QVBoxLayout
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QPixmap, QImage
+from PySide2.QtWidgets import QWidget, QLabel, QVBoxLayout
+from PySide2.QtCore import Qt
+from PySide2.QtGui import QPixmap, QImage
 
 
 class ImageViewer(QWidget):
@@ -78,3 +78,4 @@ class ImageViewer(QWidget):
             return
         scaled = self._pixmap.scaled(self.lbl.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.lbl.setPixmap(scaled)
+
