@@ -35,7 +35,7 @@ except Exception:
     )
     sys.exit(1)
 
-# 우리가 만든 메인 화면 가져오기
+# 만든 메인 화면 가져오기
 from ui.main_window import OMRScannerApp
 
 def main():

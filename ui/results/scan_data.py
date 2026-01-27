@@ -57,7 +57,7 @@ class ScanDataView(QWidget):
         for r_idx, row in enumerate(rows):
             read_num = row[0]
             sheet_code = row[1]
-            result_str = row[2] # 예: "12130"
+            result_str = row[2] or ""  # 예: "12130"
             
             self.table.setItem(r_idx, 0, self._item(read_num))
             self.table.setItem(r_idx, 1, self._item(sheet_code))

@@ -1,5 +1,6 @@
 import os
-import json
+
+from utils.text_io import read_json
 
 
 # -------------------------------------------------
@@ -31,8 +32,7 @@ def list_forms():
 
         path = os.path.join(base, fn)
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = read_json(path)
 
             form_id = data.get("form_id", fn)
             display = data.get("display_name", form_id)
@@ -50,8 +50,7 @@ def load_form(path: str) -> dict:
     """
     폼 JSON 로드
     """
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return read_json(path)
 
 
 # -------------------------------------------------

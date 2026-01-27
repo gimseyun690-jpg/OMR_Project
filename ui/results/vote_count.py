@@ -1,10 +1,12 @@
 from PySide2.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QGroupBox,
     QGridLayout, QTableWidget, QHeaderView, QPushButton,
-    QTableWidgetItem, QLineEdit, QSpinBox, QCheckBox
+    QTableWidgetItem, QLineEdit, QSpinBox, QCheckBox,
+    QMessageBox, QFileDialog
 )
 from PySide2.QtCore import Qt
 from database import DBManager
+import csv
 
 
 class VoteCountView(QWidget):
@@ -97,6 +99,7 @@ class VoteCountView(QWidget):
 
         self.btn_export = QPushButton("\uc5d1\uc140 \ub0b4\ubcf4\ub0b4\uae30")
         self.btn_export.setMinimumHeight(40)
+        self.btn_export.clicked.connect(self.export_csv)
 
         btn_layout.addStretch()
         btn_layout.addWidget(self.btn_refresh)
@@ -231,4 +234,30 @@ class VoteCountView(QWidget):
         item.setTextAlignment(Qt.AlignCenter)
         item.setFlags(item.flags() | Qt.ItemIsEditable)
         return item
+
+    def export_csv(self):
+        if self.table.rowCount() == 0:
+            QMessageBox.information(self, "\uc548\ub0b4", "\ub0b4\ubcf4\ub0bc \uacb0\uacfc\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.")
+            return
+        from datetime import datetime
+        ts = datetime.now().strftime("%Y%m%d_%H%M")
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "\ud22c\ud45c \uc9d1\uacc4 \ub0b4\ubcf4\ub0b4\uae30", f"vote_count_{ts}.csv", "CSV Files (*.csv)"
+        )
+        if not filename:
+            return
+        try:
+            with open(filename, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                headers = ["\uc548\uac74\uba85", "\ucc2c\uc131(1)", "\ubc18\ub300(2)", "\uae30\uad8c/\ubb34\ud6a8"]
+                writer.writerow(headers)
+                for r in range(self.table.rowCount()):
+                    row = []
+                    for c in range(self.table.columnCount()):
+                        item = self.table.item(r, c)
+                        row.append(item.text() if item else "")
+                    writer.writerow(row)
+            QMessageBox.information(self, "\uc644\ub8cc", "CSV \ub0b4\ubcf4\ub0b4\uae30\uac00 \uc644\ub8cc\ub418\uc5c8\uc2b5\ub2c8\ub2e4.")
+        except Exception as e:
+            QMessageBox.warning(self, "\ub0b4\ubcf4\ub0b4\uae30 \uc2e4\ud328", str(e))
 

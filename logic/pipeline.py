@@ -2,7 +2,7 @@ import os
 import traceback
 import cv2
 import numpy as np
-import json
+from utils.text_io import read_json
 
 from logic.omr_engine import OMREngine
 from database import DBManager
@@ -85,8 +85,7 @@ class ScanPipeline:
 
         if form_path and os.path.exists(form_path):
             try:
-                with open(form_path, "r", encoding="utf-8") as f:
-                    self.form_data = json.load(f)
+                self.form_data = read_json(form_path)
 
                 # 폼의 OMR 파라미터 즉시 적용 (타입 강제)
                 omr_settings = self.form_data.get("omr", {}) if isinstance(self.form_data, dict) else {}

@@ -1,7 +1,7 @@
 PySide2
-PySide2-Fluent-Widgets[full]
 pytwain
 opencv-python
 numpy
 Pillow
 matplotlib
+PySide2-Fluent-Widgets[full]

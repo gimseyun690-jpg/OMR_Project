@@ -193,6 +193,22 @@ class HomeInterface(QWidget):
             _icon("SETTING"),
         )
 
+        self.card_rebuild = HomeCard(
+            "재개발·재건축 선거업무",
+            "조합/비상대책위/총회 투표 및 집계",
+            _icon("CITY"),
+        )
+        self.card_church = HomeCard(
+            "교회 항존직 선거업무",
+            "장로·안수집사·권사 선거 관리",
+            _icon("PEOPLE"),
+        )
+        self.card_exam = HomeCard(
+            "성적처리/채용시험/자격증시험선거업무/설문지_채점대행",
+            "시험 채점, 통계, 결과 처리",
+            _icon("DOCUMENT"),
+        )
+
         self.card_file.clicked.connect(self.open_file_settings.emit)
         self.card_coord.clicked.connect(self.open_coord_settings.emit)
         self.card_env.clicked.connect(self._emit_env_menu)
@@ -200,6 +216,9 @@ class HomeInterface(QWidget):
         grid.addWidget(self.card_file, 0, 0)
         grid.addWidget(self.card_coord, 0, 1)
         grid.addWidget(self.card_env, 0, 2)
+        grid.addWidget(self.card_rebuild, 1, 0)
+        grid.addWidget(self.card_church, 1, 1)
+        grid.addWidget(self.card_exam, 1, 2)
 
         root.addWidget(title)
         root.addLayout(grid)
@@ -233,10 +252,10 @@ class ScanInterface(QWidget):
         layout.addWidget(self.scanner_view)
 
 
-class ResultsInterface(QWidget):
+class ResultsExamInterface(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("resultsInterface")
+        self.setObjectName("resultsExamInterface")
         self._init_ui()
 
     def _init_ui(self):
@@ -244,7 +263,7 @@ class ResultsInterface(QWidget):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(10)
 
-        title = QLabel("데이터 조회 및 수정")
+        title = QLabel("시험 관리")
         title.setObjectName("resultsTitle")
 
         self.tabs = QTabWidget()
@@ -261,9 +280,6 @@ class ResultsInterface(QWidget):
         self.type_status_view = TypeStatusView()
         self.item_analysis_view = ItemAnalysisView()
 
-        self.tabs.addTab(self.vote_view, "투표 집계")
-        self.tabs.addTab(self.data_view, "스캔 데이터")
-        self.tabs.addTab(self.stats_view, "통계 분석")
         self.tabs.addTab(self.roster_view, "명단 입력")
         self.tabs.addTab(self.answer_view, "정답 입력")
         self.tabs.addTab(self.unread_view, "미판독 확인")
@@ -290,6 +306,74 @@ class ResultsInterface(QWidget):
         self.site_status_view.set_db_path(db_path)
         self.type_status_view.set_db_path(db_path)
         self.item_analysis_view.set_db_path(db_path)
+
+
+class ResultsChurchInterface(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("resultsChurchInterface")
+        self._init_ui()
+
+    def _init_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        title = QLabel("교회 선거")
+        title.setObjectName("resultsTitle")
+
+        self.tabs = QTabWidget()
+        self.vote_view = VoteCountView()
+        self.data_view = ScanDataView()
+        self.stats_view = ScanStatsView()
+
+        self.tabs.addTab(self.vote_view, "개표 결과")
+        self.tabs.addTab(self.data_view, "판독 자료")
+        self.tabs.addTab(self.stats_view, "판독 매수")
+
+        root.addWidget(title)
+        root.addWidget(self.tabs, 1)
+
+        self.setStyleSheet("#resultsTitle { font-size: 22px; font-weight: 600; }")
+
+    def set_db_path(self, db_path):
+        self.vote_view.set_db_path(db_path)
+        self.data_view.set_db_path(db_path)
+        self.stats_view.set_db_path(db_path)
+
+
+class ResultsRebuildInterface(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("resultsRebuildInterface")
+        self._init_ui()
+
+    def _init_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        title = QLabel("재개발 총회")
+        title.setObjectName("resultsTitle")
+
+        self.tabs = QTabWidget()
+        self.vote_view = VoteCountView()
+        self.data_view = ScanDataView()
+        self.stats_view = ScanStatsView()
+
+        self.tabs.addTab(self.vote_view, "개표 결과")
+        self.tabs.addTab(self.data_view, "판독 자료")
+        self.tabs.addTab(self.stats_view, "판독 매수")
+
+        root.addWidget(title)
+        root.addWidget(self.tabs, 1)
+
+        self.setStyleSheet("#resultsTitle { font-size: 22px; font-weight: 600; }")
+
+    def set_db_path(self, db_path):
+        self.vote_view.set_db_path(db_path)
+        self.data_view.set_db_path(db_path)
+        self.stats_view.set_db_path(db_path)
 
 
 class SettingsInterface(QWidget):
@@ -465,7 +549,9 @@ class OMRScannerApp(FluentWindow):
 
         self.home_interface = HomeInterface(self)
         self.scan_interface = ScanInterface(self)
-        self.results_interface = ResultsInterface(self)
+        self.results_exam_interface = ResultsExamInterface(self)
+        self.results_church_interface = ResultsChurchInterface(self)
+        self.results_rebuild_interface = ResultsRebuildInterface(self)
         self.settings_interface = SettingsInterface(self)
 
         self._init_navigation()
@@ -486,9 +572,19 @@ class OMRScannerApp(FluentWindow):
             "스캔 판독",
         )
         self.addSubInterface(
-            self.results_interface,
+            self.results_exam_interface,
             _icon("DOCUMENT"),
-            "데이터 조회 및 수정",
+            "시험 관리",
+        )
+        self.addSubInterface(
+            self.results_church_interface,
+            _icon("PEOPLE"),
+            "교회 선거",
+        )
+        self.addSubInterface(
+            self.results_rebuild_interface,
+            _icon("CITY"),
+            "재개발 총회",
         )
         self.addSubInterface(
             self.settings_interface,
@@ -526,9 +622,11 @@ class OMRScannerApp(FluentWindow):
 
     def on_db_changed(self, path, title):
         self.current_db_path = path
-        self.setWindowTitle(f"김세윤omr_project - [{title}]")
+        self.setWindowTitle(f"OMR_P - [{title}]")
         self.scan_interface.scanner_view.set_current_db(path)
-        self.results_interface.set_db_path(path)
+        self.results_exam_interface.set_db_path(path)
+        self.results_church_interface.set_db_path(path)
+        self.results_rebuild_interface.set_db_path(path)
         self._settings.setValue("startup/last_db_path", path)
 
     def get_current_db(self):

@@ -8,7 +8,7 @@ class DataGrid(QTableWidget):
         
     def init_ui(self):
         # 컬럼명 그대로
-        headers = ["판독번호", "용지코드", "판독고사장", "판독시험실", "표기오류", "점검구분", "표기내용", "앞면경로", "앞면파일명"]
+        headers = ["판독번호", "용지코드", "스캐너", "판독시험실", "표기오류", "점검구분", "표기내용", "앞면경로", "앞면파일명"]
         self.setColumnCount(len(headers))
         self.setHorizontalHeaderLabels(headers)
         

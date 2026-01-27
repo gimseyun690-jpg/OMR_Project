@@ -1,6 +1,5 @@
 # ui/settings/coord_calibrator.py
 import os
-import json
 import cv2
 import numpy as np
 import traceback
@@ -859,8 +858,9 @@ class CoordCalibratorDialog(QDialog):
             if not path:
                 return
 
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.form_data, f, indent=2, ensure_ascii=False)
+            from utils.text_io import write_json
+
+            write_json(path, self.form_data, indent=2)
 
             self._log(f"[SAVE] {path}")
             QMessageBox.information(self, "저장", "JSON 저장 완료")

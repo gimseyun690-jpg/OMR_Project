@@ -182,6 +182,8 @@ class ScannerReadingView(QWidget):
         self.last_scan_params = None
         self.last_error_code = ""
         self.show_error_popups = True
+        self.current_summary_row = None
+        self.session_start_room_text = None
 
         self.pipeline = ScanPipeline()
 
@@ -208,6 +210,31 @@ class ScannerReadingView(QWidget):
         else:
             QMessageBox.warning(self, title, message)
 
+    def _set_last_error_message(self, message):
+        if not hasattr(self, "lbl_last_error_msg"):
+            return
+        msg = (message or "").strip()
+        if not msg:
+            msg = "없음"
+        self.lbl_last_error_msg.setText(msg)
+
+    def _add_summary_row(self, place_text: str, room_text: str):
+        row = self.summary_table.rowCount()
+        self.summary_table.insertRow(row)
+        self.summary_table.setItem(row, 0, self._item(place_text))
+        self.summary_table.setItem(row, 1, self._item(room_text))
+        self.summary_table.setItem(row, 2, self._item("0"))
+        self.summary_table.selectRow(row)
+        self.current_summary_row = row
+
+    def _update_summary_count(self):
+        if self.current_summary_row is None:
+            return
+        item = self.summary_table.item(self.current_summary_row, 2)
+        if item is None:
+            self.summary_table.setItem(self.current_summary_row, 2, self._item(str(self.current_session_count)))
+        else:
+            item.setText(str(self.current_session_count))
 
     # -------------------------------------------------------------------------
         # [1] UI 작성
@@ -348,7 +375,7 @@ class ScannerReadingView(QWidget):
 
         top_layout.addWidget(grp_cnt, 14)
         top_layout.addWidget(grp_set, 34)
-        top_layout.addWidget(grp_err, 36)
+        top_layout.addWidget(grp_err, 28)
         top_layout.addWidget(grp_chk, 16) # grp_chk 추가
         main_layout.addWidget(top_frame)
 
@@ -359,14 +386,13 @@ class ScannerReadingView(QWidget):
 
         self.summary_table = QTableWidget()
         self.summary_table.setColumnCount(3)
-        self.summary_table.setHorizontalHeaderLabels(["판독고사장", "판독시험실", "판독매수"])
+        self.summary_table.setHorizontalHeaderLabels(["스캐너", "판독시험실", "판독매수"])
         self.summary_table.verticalHeader().setVisible(False)
         self.summary_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.summary_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.summary_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.summary_table.itemSelectionChanged.connect(self._on_summary_selected)
         self.summary_table.setStyleSheet("QHeaderView::section { background-color: #D1E8FF; border: 1px solid #999; font-weight: bold; font-size: 11px; } QTableWidget { gridline-color: #ccc; font-size: 11px; }")
-        self.summary_table.insertRow(0)
-        self.summary_table.setItem(0, 0, self._item("스캐너1"))
-        self.summary_table.setItem(0, 1, self._item("1"))
-        self.summary_table.setItem(0, 2, self._item("0"))
 
         self.main_grid = DataGrid()
         self.main_grid.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -682,15 +708,27 @@ class ScannerReadingView(QWidget):
                 print(f"파일명 변경 실패: {e}")
         self.reload_grid_from_db()
 
-    def reload_grid_from_db(self):
+    def reload_grid_from_db(self, place=None, room=None):
         if not self.current_db_path:
             return
+        if place is None and room is None:
+            sel = self.summary_table.selectionModel()
+            if sel and sel.hasSelection():
+                row = sel.selectedRows()[0].row()
+                place_item = self.summary_table.item(row, 0)
+                room_item = self.summary_table.item(row, 1)
+                if place_item and room_item:
+                    place = place_item.text()
+                    room = room_item.text()
         self.main_grid.setRowCount(0)
         rows = self.db.get_all_scans(self.current_db_path)
         for row in rows:
             read_num = row[1]
-            place = row[2]
-            room = row[3]
+            row_place = row[2]
+            row_room = row[3]
+            if place is not None and room is not None:
+                if str(row_place) != str(place) or str(row_room) != str(room):
+                    continue
             image_path = row[4]
             sheet_code = row[5]
             result_str = row[6]
@@ -699,8 +737,8 @@ class ScannerReadingView(QWidget):
             row_data = [
                 str(read_num),
                 str(sheet_code),
-                str(place),
-                str(room),
+                str(row_place),
+                str(row_room),
                 ui_status,
                 "완료",
                 str(result_str),
@@ -708,6 +746,19 @@ class ScannerReadingView(QWidget):
                 os.path.basename(image_path) if image_path else "",
             ]
             self.main_grid.add_row_data(row_data)
+
+    def _on_summary_selected(self):
+        sel = self.summary_table.selectionModel()
+        if not sel or not sel.hasSelection():
+            return
+        row = sel.selectedRows()[0].row()
+        place_item = self.summary_table.item(row, 0)
+        room_item = self.summary_table.item(row, 1)
+        if not place_item or not room_item:
+            return
+        place = place_item.text()
+        room = room_item.text()
+        self.reload_grid_from_db(place=place, room=room)
 
     def _find_text(self, from_current: bool):
         text, ok = QInputDialog.getText(self, "찾기", "검색어:")
@@ -886,6 +937,7 @@ class ScannerReadingView(QWidget):
 
         current_place = self.cb_place.currentText()
         current_room = self.cb_room.currentText()
+        self.current_session_count = 0
 
         # 진행용 다이얼로그
         self.demo_progress = QProgressDialog("데모 판독 준비중...", "취소", 0, len(files), self)
@@ -924,10 +976,11 @@ class ScannerReadingView(QWidget):
         # UI에 결과 반영 (메인 스레드)
         self.main_grid.add_row_data(row_data)
         self.total_read = int(row_data[0])  # read_num 반영
+        self.current_session_count += 1
         if len(row_data) > 7 and hasattr(self.control_panel, "image_viewer"):
             self.control_panel.image_viewer.set_image_path(row_data[7])
         self.lbl_total.setText(str(self.total_read))
-        self.lbl_cur_cnt.setText(str(self.total_read))
+        self.lbl_cur_cnt.setText(str(self.current_session_count))
         self.control_panel.txt_temp.setText(str(self.total_read))
         self.main_grid.scrollToBottom()
 
@@ -942,9 +995,21 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_demo.setText("📂 테스트 이미지 불러오기")
 
         try:
+            self.reload_grid_from_db()
             self.update_statistics()
         except Exception:
             pass
+
+        place = self.cb_place.currentText()
+        room = self.cb_room.currentText()
+        count = str(self.current_session_count)
+        row = self.summary_table.rowCount()
+        self.summary_table.insertRow(row)
+        self.summary_table.setItem(row, 0, self._item(place))
+        self.summary_table.setItem(row, 1, self._item(room))
+        self.summary_table.setItem(row, 2, self._item(count))
+        self.summary_table.selectRow(row)
+        self.reload_grid_from_db(place=place, room=room)
 
         # 데모 종료 후 다음 시험실로 자동 이동
         self._advance_room()
@@ -960,6 +1025,7 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_demo.setEnabled(True)
         self.control_panel.btn_demo.setText("📂 테스트 이미지 불러오기")
 
+        self._set_last_error_message(msg)
         self._show_error_popup("데모 오류", msg, critical=True)
 
 
@@ -995,6 +1061,8 @@ class ScannerReadingView(QWidget):
         self.next_emit_read_num = self.session_start_read_num
         self.pending_analyze = 0
         self.auto_next_pending = False
+        self.current_summary_row = None
+        self.session_start_room_text = self.cb_room.currentText()
 
         # 재시도 대비 설정 저장
         self.last_scan_params = {
@@ -1057,6 +1125,7 @@ class ScannerReadingView(QWidget):
 
     def _on_analyze_error(self, msg):
         self.pending_analyze = max(self.pending_analyze - 1, 0)
+        self._set_last_error_message(msg)
         self._show_error_popup("오류", msg)
         if self.pending_analyze == 0:
             self._maybe_start_auto_review()
@@ -1070,9 +1139,13 @@ class ScannerReadingView(QWidget):
     def _append_row(self, row_data):
         if len(row_data) > 5 and row_data[5] == "타이밍 마크 오류입니다.":
             self._show_timing_mark_error(row_data[7], row_data[5])
+        if len(row_data) > 4 and str(row_data[4]) == "오류":
+            err_msg = row_data[5] if len(row_data) > 5 else "오류"
+            self._set_last_error_message(err_msg)
         self.main_grid.add_row_data(row_data)
         self.lbl_total.setText(str(self.total_read))        # 전체 누적
         self.lbl_cur_cnt.setText(str(self.current_session_count))  # 현재 시험실만
+        self._update_summary_count()
         self.main_grid.scrollToBottom()
 
     def _show_timing_mark_error(self, image_path, message):
@@ -1115,6 +1188,7 @@ class ScannerReadingView(QWidget):
         if not self.current_db_path: return
         total, normal, error = self.db.get_statistics(self.current_db_path)
         
+        self.total_read = total
         self.lbl_total.setText(str(total))
         self.lbl_check.setText(str(error)) 
         self.control_panel.txt_temp.setText(str(total))
@@ -1183,16 +1257,18 @@ class ScannerReadingView(QWidget):
 
     @Slot()
     def on_finished(self):
-        # [기존 기능] 좌측 요약 테이블 추가
+        # [수정] 좌측 요약 테이블 갱신
         place = self.cb_place.currentText()
         room = self.cb_room.currentText()
         count = str(self.current_session_count)
-        
         row = self.summary_table.rowCount()
         self.summary_table.insertRow(row)
         self.summary_table.setItem(row, 0, self._item(place))
         self.summary_table.setItem(row, 1, self._item(room))
         self.summary_table.setItem(row, 2, self._item(count))
+        self.summary_table.selectRow(row)
+        self.current_summary_row = None
+        self.reload_grid_from_db(place=place, room=room)
         
         if self.control_panel.chk_next.isChecked():
             QMessageBox.information(self, "완료", f"{place} - {room} 시험실 스캔 완료\n(총 {count}매)")
@@ -1214,8 +1290,10 @@ class ScannerReadingView(QWidget):
         self.last_error_code = code
 
         if user_msg:
+            self._set_last_error_message(user_msg)
             self._show_error_popup("오류", user_msg)
         else:
+            self._set_last_error_message(msg)
             self._show_error_popup("오류", msg)
 
         if retryable:
