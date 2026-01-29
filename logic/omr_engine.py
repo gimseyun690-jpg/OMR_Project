@@ -112,13 +112,11 @@ class OMREngine:
         return img, False, "fallback_original"
 
     # =========================================================
-    # 사이드 마크 감지
+    # 사이드 마크 감지 (조건 완화 버전)
     # =========================================================
-    def find_side_markers(self, image, min_area=100, max_area=5000):
+    def find_side_markers(self, image, min_area=50, max_area=15000): # [수정] 면적 범위 확대
         """
         반환값: [{'cx': int, 'cy': int}, ...] (Y좌표 순 정렬)
-        - Otsu 이진화로 밝기 편차 대응
-        - findContours 호환 처리
         """
         try:
             if image is None:
@@ -139,7 +137,11 @@ class OMREngine:
 
             for cnt in contours:
                 area = cv2.contourArea(cnt)
-                if not (min_area < area < max_area):
+                # [수정] 너무 작은 점만 아니면 일단 통과
+                if area < min_area: 
+                    continue
+                # (너무 큰 덩어리는 표 테두리일 수 있으니 제한은 두되 넉넉하게)
+                if area > max_area:
                     continue
 
                 x, y, bw, bh = cv2.boundingRect(cnt)
@@ -147,11 +149,14 @@ class OMREngine:
                     continue
 
                 aspect_ratio = float(bw) / float(bh)
-                if not (0.6 < aspect_ratio < 1.7):
+                # [수정] 비율 조건 완화 (0.6~1.7 -> 0.3~3.5)
+                # 가로로 길거나 세로로 긴 마크도 인정
+                if not (0.3 < aspect_ratio < 3.5):
                     continue
 
-                # 왼쪽 20% 영역
-                if x > (w * 0.2):
+                # [수정] 위치 제한 완화 (20% -> 35%)
+                # 종이가 밀려서 찍혔을 때를 대비
+                if x > (w * 0.35):
                     continue
 
                 M = cv2.moments(cnt)
@@ -160,6 +165,7 @@ class OMREngine:
                     cy = int(M["m01"] / M["m00"])
                     markers.append({"cx": cx, "cy": cy})
 
+            # Y좌표 순 정렬
             markers.sort(key=lambda m: m["cy"])
             return markers
 

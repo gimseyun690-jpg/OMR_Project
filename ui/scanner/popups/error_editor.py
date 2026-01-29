@@ -1,28 +1,47 @@
 # -*- coding: utf-8 -*-
 import cv2
-from PySide2.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                             QTableWidget, QTableWidgetItem, QPushButton,
-                             QHeaderView, QSplitter, QCheckBox, QWidget,
-                             QAbstractItemView, QGroupBox, QGridLayout, QFrame, QMessageBox, QScrollArea)
+from PySide2.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QLabel,
+    QTableWidget,
+    QTableWidgetItem,
+    QPushButton,
+    QHeaderView,
+    QSplitter,
+    QCheckBox,
+    QWidget,
+    QAbstractItemView,
+    QFrame,
+    QMessageBox,
+    QScrollArea,
+)
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QPixmap, QImage, QColor, QFont
 
+
 class ErrorCorrectionDialog(QDialog):
-    # 메인 윈도우에게 "다음/이전 파일 보여줘"라고 요청하는 신호
+    # 메인 윈도우에 "다음/이전 결과 보기" 요청하는 시그널
     request_next = Signal()
     request_prev = Signal()
 
     def __init__(self, parent=None, image_cv=None, scan_results=None, image_path=""):
         super().__init__(parent)
-        self.setWindowTitle("조회/수정 점검 상태")
-        
+        self.setWindowTitle("판독결과 조회/수정")
+
         # 윈도우 설정
-        self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint)
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowMaximizeButtonHint
+            | Qt.WindowMinimizeButtonHint
+            | Qt.WindowCloseButtonHint
+        )
         self.resize(1600, 900)
         self.setFont(QFont("Malgun Gothic", 10))
-        
+
         self.image_cv = image_cv
-        self.scan_results = scan_results # 리스트 딕셔너리 [{'q_num':1, 'marked':[0], 'status':'정상'}...]
+        self.scan_results = scan_results  # 리스트 형태 [{'q_num':1, 'marked':[0], 'status':'정상'}...]
         self.image_path = image_path
         self.exit_code = 0
         self._split_threshold = 20
@@ -33,9 +52,9 @@ class ErrorCorrectionDialog(QDialog):
         self._orig_pixmap = None
 
         self.init_ui()
-        self.connect_signals() # ★ 버튼 기능 연결
+        self.connect_signals()  # 버튼 기능 연결
         self.setSizeGripEnabled(True)
-        
+
         self.load_data()
 
     def init_ui(self):
@@ -43,7 +62,7 @@ class ErrorCorrectionDialog(QDialog):
         main_layout.setContentsMargins(12, 12, 12, 12)
         main_layout.setSpacing(10)
 
-        # [1] 상단 패널
+        # [1] 상단 카드
         top_panel = QFrame()
         top_panel.setObjectName("topPanel")
         top_panel.setFixedHeight(110)
@@ -51,14 +70,14 @@ class ErrorCorrectionDialog(QDialog):
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(10)
 
-        # (1-1) 점검 진행 카드
+        # (1-1) 오류 진행 카드
         card_idx = QFrame()
         card_idx.setObjectName("card")
         card_idx.setMinimumWidth(160)
         v_idx = QVBoxLayout(card_idx)
         v_idx.setContentsMargins(12, 10, 12, 10)
         v_idx.setSpacing(6)
-        lbl_idx_title = QLabel("점검 진행")
+        lbl_idx_title = QLabel("오류 진행")
         lbl_idx_title.setObjectName("cardTitle")
         self.lbl_idx = QLabel("1/1")
         self.lbl_idx.setObjectName("progressValue")
@@ -83,8 +102,8 @@ class ErrorCorrectionDialog(QDialog):
         v_nav.addWidget(lbl_nav_title, 0, Qt.AlignLeft)
         nav_row = QHBoxLayout()
         nav_row.setSpacing(8)
-        self.btn_prev = QPushButton("이전 자료")
-        self.btn_next = QPushButton("다음 자료")
+        self.btn_prev = QPushButton("이전 항목")
+        self.btn_next = QPushButton("다음 항목")
         nav_row.addWidget(self.btn_prev)
         nav_row.addWidget(self.btn_next)
         v_nav.addLayout(nav_row)
@@ -116,7 +135,7 @@ class ErrorCorrectionDialog(QDialog):
         v_save = QVBoxLayout(card_save)
         v_save.setContentsMargins(12, 10, 12, 10)
         v_save.setSpacing(6)
-        lbl_save_title = QLabel("완료")
+        lbl_save_title = QLabel("저장")
         lbl_save_title.setObjectName("cardTitle")
         self.btn_save = QPushButton("확인/저장 후 다음 (S)")
         self.btn_save.setObjectName("primaryButton")
@@ -127,7 +146,7 @@ class ErrorCorrectionDialog(QDialog):
 
         main_layout.addWidget(top_panel)
 
-        # [2] 중단 작업 영역
+        # [2] 중앙 작업 영역
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(5)
         splitter.setStyleSheet("QSplitter::handle { background-color: #ccc; }")
@@ -139,7 +158,7 @@ class ErrorCorrectionDialog(QDialog):
         layout_left = QVBoxLayout(frame_left)
         layout_left.setContentsMargins(0, 0, 0, 0)
 
-        self.lbl_info = QLabel(f"  현재 파일명 {self.image_path}")
+        self.lbl_info = QLabel(f"  현재 파일명: {self.image_path}")
         self.lbl_info.setFixedHeight(30)
         self.lbl_info.setObjectName("imageInfo")
         layout_left.addWidget(self.lbl_info)
@@ -155,7 +174,7 @@ class ErrorCorrectionDialog(QDialog):
         layout_left.addWidget(self.image_scroll)
         splitter.addWidget(frame_left)
 
-        # 우측: 데이터 (상/하 분할)
+        # 우측: 판독결과(문항 분할)
         frame_right = QWidget()
         layout_right = QVBoxLayout(frame_right)
         layout_right.setContentsMargins(0, 0, 0, 0)
@@ -190,7 +209,8 @@ class ErrorCorrectionDialog(QDialog):
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
 
-        self.setStyleSheet("""
+        self.setStyleSheet(
+            """
             QDialog { background: #F7F9FC; }
             #topPanel { background: transparent; }
             #card {
@@ -231,14 +251,16 @@ class ErrorCorrectionDialog(QDialog):
                 font-weight: 600;
                 font-size: 13px;
             }
-        """)
+        """
+        )
 
     def _create_table(self):
         table = QTableWidget()
         table.setColumnCount(3)
         table.setHorizontalHeaderLabels(["문항", "찬성(1)", "반대(2)"])
         table.verticalHeader().setVisible(False)
-        table.setStyleSheet("""
+        table.setStyleSheet(
+            """
             QHeaderView::section {
                 background-color: #F1F5F9; padding: 6px; border: 1px solid #E2E8F0;
                 font-weight: bold; font-size: 13px; color: #0F172A;
@@ -247,7 +269,8 @@ class ErrorCorrectionDialog(QDialog):
                 gridline-color: #E5E7EB; font-size: 13px; selection-background-color: #D1E8FF; selection-color: black;
                 background: #FFFFFF; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px;
             }
-        """)
+        """
+        )
         header = table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -260,7 +283,7 @@ class ErrorCorrectionDialog(QDialog):
         for row, idx in enumerate(indices):
             data = self.scan_results[idx]
 
-            item_no = QTableWidgetItem(str(data['q_num']))
+            item_no = QTableWidgetItem(str(data["q_num"]))
             item_no.setTextAlignment(Qt.AlignCenter)
             item_no.setFlags(item_no.flags() & ~Qt.ItemIsEditable)
             table.setItem(row, 0, item_no)
@@ -270,13 +293,15 @@ class ErrorCorrectionDialog(QDialog):
             chk_agree.setStyleSheet("QCheckBox::indicator { width: 20px; height: 20px; }")
             chk_disagree.setStyleSheet("QCheckBox::indicator { width: 20px; height: 20px; }")
 
-            if 0 in data['marked']:
+            if 0 in data["marked"]:
                 chk_agree.setChecked(True)
-            if 1 in data['marked']:
+            if 1 in data["marked"]:
                 chk_disagree.setChecked(True)
 
             chk_agree.clicked.connect(lambda checked, r=idx: self.on_checkbox_click(r, 0, checked))
-            chk_disagree.clicked.connect(lambda checked, r=idx: self.on_checkbox_click(r, 1, checked))
+            chk_disagree.clicked.connect(
+                lambda checked, r=idx: self.on_checkbox_click(r, 1, checked)
+            )
 
             w1 = QWidget()
             l1 = QHBoxLayout(w1)
@@ -291,18 +316,19 @@ class ErrorCorrectionDialog(QDialog):
             table.setCellWidget(row, 1, w1)
             table.setCellWidget(row, 2, w2)
 
-            status = data['status']
+            status = data["status"]
             if status != "정상":
                 bg_color = QColor(255, 255, 255)
                 txt_color = QColor(0, 0, 0)
                 if status == "중복":
                     bg_color = QColor(0, 0, 255)
                     txt_color = QColor(255, 255, 255)
-                elif status == "공란":
+                elif status == "공백":
                     bg_color = QColor(255, 200, 200)
                     txt_color = QColor(255, 0, 0)
                 item_no.setBackground(bg_color)
                 item_no.setForeground(txt_color)
+
     def _get_active_table(self):
         if self.table_right.isVisible() and self.table_right.hasFocus():
             return self.table_right, self._right_map
@@ -326,19 +352,18 @@ class ErrorCorrectionDialog(QDialog):
             self.table_right.selectRow(row)
             self.table_right.setFocus()
 
-
     def connect_signals(self):
         """버튼 기능 연결"""
         self.btn_save.clicked.connect(self.save_and_close)
         self.btn_prev.clicked.connect(self.on_prev)
         self.btn_next.clicked.connect(self.on_next)
-        
+
         # 일괄 처리 버튼 연결
-        self.btn_all_agree.clicked.connect(lambda: self.batch_process(0))    # 0: 찬성
-        self.btn_all_disagree.clicked.connect(lambda: self.batch_process(1)) # 1: 반대
+        self.btn_all_agree.clicked.connect(lambda: self.batch_process(0))  # 0: 찬성
+        self.btn_all_disagree.clicked.connect(lambda: self.batch_process(1))  # 1: 반대
 
     def load_data(self):
-        """데이터를 화면에 뿌리기"""
+        """데이터를 화면에 표시"""
         self.update_image()
 
         if not self.scan_results:
@@ -346,9 +371,9 @@ class ErrorCorrectionDialog(QDialog):
 
         error_logs = []
         for data in self.scan_results:
-            status = data.get('status')
+            status = data.get("status")
             if status and status != "정상":
-                error_logs.append(f"[{data['q_num']}번 안건] {status} 오류")
+                error_logs.append(f"[{data['q_num']}번 문항] {status} 오류")
 
         total = len(self.scan_results)
         if total > 40:
@@ -400,10 +425,6 @@ class ErrorCorrectionDialog(QDialog):
                 "padding: 10px; color: #2E7D32; font-weight: bold; font-size: 13px;"
             )
 
-
-
-
-
     def wheelEvent(self, event):
         if self.image_scroll.underMouse():
             delta = event.angleDelta().y()
@@ -436,41 +457,40 @@ class ErrorCorrectionDialog(QDialog):
         self._panning = False
         self.lbl_image.setCursor(Qt.OpenHandCursor)
 
-
     def on_checkbox_click(self, row, col_type, checked):
-        """체크박스를 누르면 실제 데이터(self.scan_results)를 업데이트"""
-        target_list = self.scan_results[row]['marked']
-        
-        # 체크함
+        """체크박스를 클릭하면 실제 데이터(self.scan_results)를 업데이트"""
+        target_list = self.scan_results[row]["marked"]
+
+        # 체크
         if checked:
             if col_type not in target_list:
                 target_list.append(col_type)
-        # 체크 해제함
+        # 체크 해제
         else:
             if col_type in target_list:
                 target_list.remove(col_type)
-        
-        target_list.sort() # 정렬
-        
-        # 상태 재판단 (정상/중복/공란)
+
+        target_list.sort()  # 정렬
+
+        # 상태 판정(정상/중복/공백)
         if len(target_list) == 0:
-            self.scan_results[row]['status'] = "공란"
+            self.scan_results[row]["status"] = "공백"
         elif len(target_list) == 1:
-            self.scan_results[row]['status'] = "정상"
+            self.scan_results[row]["status"] = "정상"
         else:
-            self.scan_results[row]['status'] = "중복"
-            
-        # (선택사항) 상태가 바뀌었으니 테이블 색상도 즉시 갱신하고 싶다면:
-        # self.load_data() # 하지만 깜빡거릴 수 있으므로, 로그 정도만 업데이트해도 됨
+            self.scan_results[row]["status"] = "중복"
+
+        # (선택사항) 상태가 변경되면 테이블 표시를 갱신
+        # self.load_data()
 
     def batch_process(self, target_val):
         """일괄 처리 로직"""
         # 모든 데이터 수정
         for data in self.scan_results:
-            data['marked'] = [target_val] # [0] 또는 [1] 로 덮어쓰기
-            data['status'] = "정상"       # 강제 정상 처리
-        
-        # 화면 새로고침
+            data["marked"] = [target_val]  # [0] 또는 [1]로 넣기
+            data["status"] = "정상"  # 강제 정상 처리
+
+        # 화면 로그 갱신
         self.load_data()
         QMessageBox.information(self, "알림", "일괄 처리가 완료되었습니다.")
 
@@ -495,15 +515,15 @@ class ErrorCorrectionDialog(QDialog):
         next_idx = None
 
         if key == Qt.Key_1 and global_idx is not None:
-            self.scan_results[global_idx]['marked'] = [0]
-            self.scan_results[global_idx]['status'] = "정상"
+            self.scan_results[global_idx]["marked"] = [0]
+            self.scan_results[global_idx]["status"] = "정상"
             next_idx = global_idx + 1
             self.load_data()
             self._select_global_index(next_idx)
 
         elif key == Qt.Key_2 and global_idx is not None:
-            self.scan_results[global_idx]['marked'] = [1]
-            self.scan_results[global_idx]['status'] = "정상"
+            self.scan_results[global_idx]["marked"] = [1]
+            self.scan_results[global_idx]["status"] = "정상"
             next_idx = global_idx + 1
             self.load_data()
             self._select_global_index(next_idx)
@@ -515,24 +535,24 @@ class ErrorCorrectionDialog(QDialog):
             super().keyPressEvent(event)
 
     # =========================================================
-    # ★ 핵심 수정 부분: exit_code 설정하여 메인에 알림
+    # 저장/이동 버튼 처리: exit_code 설정 후 메인에 전달
     # =========================================================
     def save_and_close(self):
         """저장(S) 버튼"""
-        self.exit_code = 1 # 1 = 저장하고 다음으로
-        self.accept()      # 창 닫기
+        self.exit_code = 1  # 1 = 저장하고 다음으로
+        self.accept()  # 창 닫기
 
     def on_prev(self):
         """이전 버튼"""
-        self.exit_code = 2 # 2 = 저장 안 하고 이전으로
-        self.request_prev.emit() # (선택사항) 신호도 보내고
-        self.accept()      # 창 닫기
+        self.exit_code = 2  # 2 = 저장하지 않고 이전으로
+        self.request_prev.emit()  # (선택) 시그널 전달
+        self.accept()  # 창 닫기
 
     def on_next(self):
         """다음 버튼"""
-        self.exit_code = 3 # 3 = 저장 안 하고 다음으로
-        self.request_next.emit() # (선택사항) 신호도 보내고
-        self.accept()      # 창 닫기
+        self.exit_code = 3  # 3 = 저장하지 않고 다음으로
+        self.request_next.emit()  # (선택) 시그널 전달
+        self.accept()  # 창 닫기
 
     def update_image(self):
         if self.image_cv is not None:
@@ -543,7 +563,8 @@ class ErrorCorrectionDialog(QDialog):
                 q_img = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
                 self._orig_pixmap = QPixmap.fromImage(q_img)
                 self._render_image()
-            except: pass
+            except Exception:
+                pass
 
     def _render_image(self):
         if not self._orig_pixmap:
@@ -605,4 +626,3 @@ class _ImageLabel(QLabel):
             event.accept()
             return
         super().mouseReleaseEvent(event)
-

@@ -1,0 +1,23 @@
+{
+  "form_id": "OMR_Vote_300dpi_4Q",
+  "form_no": "OMR_V1_vote_300dpi_4q",
+  "display_name": "OMR Vote 300dpi 4문항 (사이드마커)",
+  "layout_mode": "side_marker",
+  "omr": {
+    "threshold": 140,
+    "pixel_ratio": 0.05
+  },
+  "roi_params": {
+    "marker_to_agree_dist": 1850,
+    "marker_to_disagree_dist": 2150,
+    "box_w": 40,
+    "box_h": 40
+  },
+  "questions": [
+    { "no": 1, "type": "vote" },
+    { "no": 2, "type": "vote" },
+    { "no": 3, "type": "vote" },
+    { "no": 4, "type": "vote" }
+  ],
+  "dpi": 300
+}

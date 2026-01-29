@@ -56,7 +56,7 @@ def load_form(path: str) -> dict:
 # -------------------------------------------------
 # 3. ROI 생성
 # -------------------------------------------------
-def build_rois_from_form(form_data: dict):
+def build_rois_from_form(form_data: dict, scale: float = 1.0):
     """
     form_data 기반 ROI 생성
     - vote: agree_x / disagree_x
@@ -67,10 +67,11 @@ def build_rois_from_form(form_data: dict):
     roi_cfg = form_data.get("roi", {})
     questions = int(form_data.get("questions", 0) or 0)
 
-    start_y = int(roi_cfg.get("start_y", 0))
-    gap_y = int(roi_cfg.get("gap_y", 0))
-    w = int(roi_cfg.get("w", 30))
-    h = int(roi_cfg.get("h", 30))
+    scale = float(scale) if scale else 1.0
+    start_y = int(round(int(roi_cfg.get("start_y", 0)) * scale))
+    gap_y = int(round(int(roi_cfg.get("gap_y", 0)) * scale))
+    w = int(round(int(roi_cfg.get("w", 30)) * scale))
+    h = int(round(int(roi_cfg.get("h", 30)) * scale))
 
     if questions <= 0:
         return rois
@@ -87,7 +88,7 @@ def build_rois_from_form(form_data: dict):
             y = start_y + i * gap_y
             row = []
             for x in choice_x:
-                row.append((int(x), int(y), w, h))
+                row.append((int(round(int(x) * scale)), int(y), w, h))
             rois.append(row)
 
         return rois
@@ -104,8 +105,8 @@ def build_rois_from_form(form_data: dict):
     for i in range(questions):
         y = start_y + i * gap_y
         rois.append([
-            (int(agree_x), int(y), w, h),
-            (int(disagree_x), int(y), w, h),
+            (int(round(int(agree_x) * scale)), int(y), w, h),
+            (int(round(int(disagree_x) * scale)), int(y), w, h),
         ])
 
     return rois

@@ -14,6 +14,7 @@ from PySide2.QtWidgets import (
     QSlider,
     QGroupBox,
     QComboBox,
+    QSpinBox,
     QGraphicsDropShadowEffect,
 )
 
@@ -422,6 +423,8 @@ class SettingsInterface(QWidget):
     error_popup_changed = Signal(bool)
     debug_save_changed = Signal(bool)
     warp_enabled_changed = Signal(bool)
+    auto_scale_dpi_changed = Signal(bool)
+    dpi_changed = Signal(int)
     log_level_changed = Signal(str)
     locale_changed = Signal(str)
 
@@ -475,9 +478,22 @@ class SettingsInterface(QWidget):
         self.chk_error_popup.toggled.connect(self._on_error_popup_changed)
         self.chk_warp = QCheckBox("이미지 워프(정렬) 사용")
         self.chk_warp.toggled.connect(self._on_warp_enabled_changed)
+        self.chk_auto_scale_dpi = QCheckBox("DPI 변경 시 좌표 자동 스케일")
+        self.chk_auto_scale_dpi.toggled.connect(self._on_auto_scale_dpi_changed)
+        dpi_row = QHBoxLayout()
+        dpi_row.addWidget(QLabel("스캔 DPI"))
+        self.spin_dpi = QSpinBox()
+        self.spin_dpi.setRange(50, 600)
+        self.spin_dpi.setSingleStep(50)
+        self.spin_dpi.setValue(150)
+        self.spin_dpi.valueChanged.connect(self._on_dpi_changed)
+        dpi_row.addWidget(self.spin_dpi)
+        dpi_row.addStretch(1)
         scan_layout.addWidget(self.chk_auto_retry)
         scan_layout.addWidget(self.chk_error_popup)
         scan_layout.addWidget(self.chk_warp)
+        scan_layout.addWidget(self.chk_auto_scale_dpi)
+        scan_layout.addLayout(dpi_row)
 
         # 디버그/로그
         debug_group = HoverGroupBox("디버그/로그")
@@ -529,6 +545,8 @@ class SettingsInterface(QWidget):
         self.chk_auto_retry.setChecked(self._settings.value("scan/auto_retry", False, type=bool))
         self.chk_error_popup.setChecked(self._settings.value("scan/error_popups", True, type=bool))
         self.chk_warp.setChecked(self._settings.value("scan/warp_enabled", True, type=bool))
+        self.chk_auto_scale_dpi.setChecked(self._settings.value("scan/auto_scale_dpi", True, type=bool))
+        self.spin_dpi.setValue(self._settings.value("scan/dpi", 150, type=int))
         self.chk_debug_save.setChecked(self._settings.value("debug/save_on_error", False, type=bool))
 
         log_level = self._settings.value("log/level", "INFO", type=str)
@@ -573,6 +591,14 @@ class SettingsInterface(QWidget):
     def _on_warp_enabled_changed(self, checked: bool):
         self._settings.setValue("scan/warp_enabled", checked)
         self.warp_enabled_changed.emit(checked)
+
+    def _on_auto_scale_dpi_changed(self, checked: bool):
+        self._settings.setValue("scan/auto_scale_dpi", checked)
+        self.auto_scale_dpi_changed.emit(checked)
+
+    def _on_dpi_changed(self, value: int):
+        self._settings.setValue("scan/dpi", int(value))
+        self.dpi_changed.emit(int(value))
 
     def _on_debug_save_changed(self, checked: bool):
         self._settings.setValue("debug/save_on_error", checked)
@@ -672,6 +698,8 @@ class OMRScannerApp(FluentWindow):
         self.settings_interface.error_popup_changed.connect(self._apply_error_popups)
         self.settings_interface.debug_save_changed.connect(self._apply_debug_save)
         self.settings_interface.warp_enabled_changed.connect(self._apply_warp_enabled)
+        self.settings_interface.auto_scale_dpi_changed.connect(self._apply_auto_scale_dpi)
+        self.settings_interface.dpi_changed.connect(self._apply_scan_dpi)
         self.settings_interface.log_level_changed.connect(self._apply_log_level)
 
     def open_file_setting(self):
@@ -776,6 +804,8 @@ class OMRScannerApp(FluentWindow):
         self._apply_error_popups(self._settings.value("scan/error_popups", True, type=bool))
         self._apply_debug_save(self._settings.value("debug/save_on_error", False, type=bool))
         self._apply_warp_enabled(self._settings.value("scan/warp_enabled", True, type=bool))
+        self._apply_auto_scale_dpi(self._settings.value("scan/auto_scale_dpi", True, type=bool))
+        self._apply_scan_dpi(self._settings.value("scan/dpi", 150, type=int))
         self._apply_log_level(self._settings.value("log/level", "INFO", type=str))
 
     def _apply_auto_retry(self, enabled: bool):
@@ -797,6 +827,16 @@ class OMRScannerApp(FluentWindow):
         view = self.scan_interface.scanner_view
         if hasattr(view, "pipeline"):
             view.pipeline.warp_enabled = bool(enabled)
+
+    def _apply_auto_scale_dpi(self, enabled: bool):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.set_auto_scale_dpi(enabled)
+
+    def _apply_scan_dpi(self, value: int):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.set_dpi(int(value))
 
     def _apply_log_level(self, level: str):
         import logging

@@ -1,4 +1,4 @@
-import sqlite3
+﻿import sqlite3
 import os
 import getpass
 from datetime import datetime
@@ -154,7 +154,7 @@ class DBManager:
 
     def insert_scan_result(self, db_path, data: dict):
         """
-        tblScanData 저장
+        tblScanData 삽입
         data keys: read_num, place, room, path, sheet_code, mark_result, is_valid
         """
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -271,7 +271,7 @@ class DBManager:
             editor = getpass.getuser()
         created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # with문을 사용하여 close를 자동으로 처리 (더 안전함)
+        # with문으로 close 자동 처리 (안전성)
         with self._get_conn(db_path) as conn:
             cur = conn.cursor()
             cur.execute("""
@@ -281,14 +281,51 @@ class DBManager:
             """, (read_num, image_path, before_result, after_result, editor, reason, created_at))
             conn.commit()
     # ========================================================
-    # [추가] 데이터 수정 및 조회 기능 (완전판)
+    # [추가] 데이터 수정/조회 기능 (레거시 포함)
     # ========================================================
     def update_scan_result(self, db_path, read_num, mark_result, is_valid):
-        """수정된 결과를 DB에 반영"""
+        """수정 결과를 DB에 반영"""
         with self._get_conn(db_path) as conn:
             cursor = conn.cursor()
             sql = "UPDATE tblScanData SET mark_result = ?, is_valid = ? WHERE read_num = ?"
             cursor.execute(sql, (mark_result, is_valid, read_num))
+            conn.commit()
+
+
+    def update_scan_result_detail(
+        self,
+        db_path,
+        read_num,
+        mark_result,
+        is_valid,
+        error_message=None,
+        sheet_code=None,
+        exam_no=None,
+        birth=None,
+        subject=None,
+    ):
+        fields = ["mark_result = ?", "is_valid = ?"]
+        values = [mark_result, is_valid]
+        if error_message is not None:
+            fields.append("error_message = ?")
+            values.append(error_message)
+        if sheet_code is not None:
+            fields.append("sheet_code = ?")
+            values.append(sheet_code)
+        if exam_no is not None:
+            fields.append("exam_no = ?")
+            values.append(exam_no)
+        if birth is not None:
+            fields.append("birth = ?")
+            values.append(birth)
+        if subject is not None:
+            fields.append("subject = ?")
+            values.append(subject)
+        values.append(read_num)
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            sql = f"UPDATE tblScanData SET {', '.join(fields)} WHERE read_num = ?"
+            cursor.execute(sql, values)
             conn.commit()
 
     def get_scan_by_read_num(self, db_path, read_num):
@@ -326,7 +363,7 @@ class DBManager:
 
     def renumber_read_nums(self, db_path, ordered_read_nums):
         """
-        ordered_read_nums: [old_read_num, ...] 순서대로 1..N 부여
+        ordered_read_nums: [old_read_num, ...] 순서대로 1..N 재부여
         """
         with self._get_conn(db_path) as conn:
             cursor = conn.cursor()
@@ -335,7 +372,7 @@ class DBManager:
             conn.commit()
 
     def get_all_scans(self, db_path):
-        """모든 스캔 데이터 가져오기"""
+        """모든 스캔 데이터 불러오기"""
         with self._get_conn(db_path) as conn:
             cursor = conn.cursor()
             self._ensure_scan_columns(conn)
@@ -368,7 +405,7 @@ class DBManager:
             return cursor.fetchall()
 
     def get_scans_by_place_room(self, db_path, place, room, limit=None, offset=0):
-        """고사장/시험실 필터 조회 (대량 데이터 대비)"""
+        """고사장/시험실로 결과 조회 (선택 파라미터 지원)."""
         with self._get_conn(db_path) as conn:
             cursor = conn.cursor()
             self._ensure_scan_columns(conn)
@@ -421,7 +458,7 @@ class DBManager:
             return cursor.fetchall()
 
     def get_vote_counts(self, db_path, q_count=5):
-        """[개표결과 화면] 문항별 득표수 계산"""
+        """[개표결과 화면] 문항별 집계 계산"""
         with self._get_conn(db_path) as conn:
             self._ensure_scan_columns(conn)
             cursor = conn.cursor()
@@ -463,7 +500,7 @@ class DBManager:
             return default_value
 
     def save_setting(self, db_path, key, value):
-        """설정값 저장하기 (없으면 생성, 있으면 수정)"""
+        """설정값 저장 (없으면 생성, 있으면 수정)"""
         with self._get_conn(db_path) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -472,7 +509,7 @@ class DBManager:
                     value TEXT
                 )
             """)
-            # UPSERT 방식 (SQLite 지원 버전에 따라 다를 수 있어 삭제 후 삽입 방식 사용)
+            # UPSERT 방식 (SQLite 버전에 따라 직접 INSERT/DELETE 사용)
             cursor.execute("DELETE FROM tblSettings WHERE key=?", (key,))
             cursor.execute("INSERT INTO tblSettings (key, value) VALUES (?, ?)", (key, str(value)))
             conn.commit()

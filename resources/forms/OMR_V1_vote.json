@@ -1,57 +1,135 @@
 {
   "form_id": "OMR_Vote_2025",
-  "display_name": "정기총회 서면결의서 (하이브리드)",
-  
-  "layout_mode": "side_marker", 
-  "_comment": "layout_mode: 'fixed'(절대좌표) 또는 'side_marker'(옆면마크기준)",
-
+  "display_name": "\uc815\uae30\ucd1d\ud68c \uc11c\uba74\uacb0\uc758\uc11c (\ud558\uc774\ube0c\ub9ac\ub4dc)",
+  "layout_mode": "side_marker",
+  "_comment": "layout_mode: 'fixed'(\uc808\ub300\uc88c\ud45c) \ub610\ub294 'side_marker'(\uc606\uba74\ub9c8\ud06c\uae30\uc900)",
   "omr": {
     "threshold": 127,
     "pixel_ratio": 0.25
   },
-
-  "#_comment_alignment": "alignment_marks가 비어있으면 투영 변환(펴기)을 건너뜁니다.",
-  "alignment_marks": null, 
-
+  "#_comment_alignment": "alignment_marks\uac00 \ube44\uc5b4\uc788\uc73c\uba74 \ud22c\uc601 \ubcc0\ud658(\ud3b4\uae30)\uc744 \uac74\ub108\ub701\ub2c8\ub2e4.",
+  "alignment_marks": null,
   "roi_params": {
-    "#_comment": "사이드 마크 기준일 때: 마크 중심에서 X축으로 얼마나 떨어져 있는지 설정",
-    "marker_to_agree_dist": 600,   
-    "marker_to_disagree_dist": 750, 
+    "#_comment": "\uc0ac\uc774\ub4dc \ub9c8\ud06c \uae30\uc900\uc77c \ub54c: \ub9c8\ud06c \uc911\uc2ec\uc5d0\uc11c X\ucd95\uc73c\ub85c \uc5bc\ub9c8\ub098 \ub5a8\uc5b4\uc838 \uc788\ub294\uc9c0 \uc124\uc815",
+    "marker_to_agree_dist": 600,
+    "marker_to_disagree_dist": 750,
     "box_w": 40,
     "box_h": 40
   },
-
   "questions": [
-    { "no": 1, "type": "vote" },
-    { "no": 2, "type": "vote" },
-    { "no": 3, "type": "vote" },
-    { "no": 4, "type": "vote" },
-    { "no": 5, "type": "vote" }
+    {
+      "no": 1,
+      "type": "vote"
+    },
+    {
+      "no": 2,
+      "type": "vote"
+    },
+    {
+      "no": 3,
+      "type": "vote"
+    },
+    {
+      "no": 4,
+      "type": "vote"
+    },
+    {
+      "no": 5,
+      "type": "vote"
+    }
   ],
-
   "candidate_fields": {
     "debug_overlay": true,
     "exam_no": {
       "digits": 7,
-      "grid": { "x": 140, "y": 620, "col_w": 28, "row_h": 20, "cols": 7, "rows": 10 }
+      "grid": {
+        "x": 140,
+        "y": 620,
+        "col_w": 28,
+        "row_h": 20,
+        "cols": 7,
+        "rows": 10
+      }
     },
     "birth": {
       "digits": 6,
-      "grid": { "x": 420, "y": 620, "col_w": 24, "row_h": 20, "cols": 6, "rows": 10 }
+      "grid": {
+        "x": 420,
+        "y": 620,
+        "col_w": 24,
+        "row_h": 20,
+        "cols": 6,
+        "rows": 10
+      }
     },
     "subject": {
       "type": "single",
       "choices": [
-        { "label": "행정학", "x": 590, "y": 500, "w": 18, "h": 18 },
-        { "label": "경영학", "x": 590, "y": 540, "w": 18, "h": 18 },
-        { "label": "법학", "x": 590, "y": 580, "w": 18, "h": 18 },
-        { "label": "경제학", "x": 590, "y": 620, "w": 18, "h": 18 },
-        { "label": "기계일반", "x": 590, "y": 660, "w": 18, "h": 18 },
-        { "label": "전기일반", "x": 590, "y": 700, "w": 18, "h": 18 },
-        { "label": "건축일반", "x": 590, "y": 740, "w": 18, "h": 18 },
-        { "label": "궤도 일반", "x": 590, "y": 780, "w": 18, "h": 18 },
-        { "label": "공통", "x": 590, "y": 820, "w": 18, "h": 18 }
+        {
+          "label": "\ud589\uc815\ud559",
+          "x": 590,
+          "y": 500,
+          "w": 18,
+          "h": 18
+        },
+        {
+          "label": "\uacbd\uc601\ud559",
+          "x": 590,
+          "y": 540,
+          "w": 18,
+          "h": 18
+        },
+        {
+          "label": "\ubc95\ud559",
+          "x": 590,
+          "y": 580,
+          "w": 18,
+          "h": 18
+        },
+        {
+          "label": "\uacbd\uc81c\ud559",
+          "x": 590,
+          "y": 620,
+          "w": 18,
+          "h": 18
+        },
+        {
+          "label": "\uae30\uacc4\uc77c\ubc18",
+          "x": 590,
+          "y": 660,
+          "w": 18,
+          "h": 18
+        },
+        {
+          "label": "\uc804\uae30\uc77c\ubc18",
+          "x": 590,
+          "y": 700,
+          "w": 18,
+          "h": 18
+        },
+        {
+          "label": "\uac74\ucd95\uc77c\ubc18",
+          "x": 590,
+          "y": 740,
+          "w": 18,
+          "h": 18
+        },
+        {
+          "label": "\uada4\ub3c4 \uc77c\ubc18",
+          "x": 590,
+          "y": 780,
+          "w": 18,
+          "h": 18
+        },
+        {
+          "label": "\uacf5\ud1b5",
+          "x": 590,
+          "y": 820,
+          "w": 18,
+          "h": 18
+        }
       ]
     }
-  }
+  },
+  "dpi": 150
 }

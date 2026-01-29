@@ -37,6 +37,7 @@ class ScannerDevice:
         self.win_dir = os.environ.get('WINDIR', 'C:\\Windows')
         self.double_feed_enabled = False
         self.scanner_name = ""
+        self.dpi = 150
 
         # 스캐너별 예외 메시지 키워드 보정(필요 시 추가)
         self._scanner_keyword_map = {
@@ -61,6 +62,12 @@ class ScannerDevice:
             return True, "TWAIN 연결 성공"
         except Exception as e:
             return False, f"TWAIN 연결 실패: {e}\n(스캐너 드라이버가 설치되어 있는지 확인하세요)"
+
+    def set_dpi(self, dpi: int):
+        try:
+            self.dpi = int(dpi)
+        except Exception:
+            self.dpi = 150
 
     def open_scanner(self):
         """스캐너 장비 선택 및 열기"""
@@ -116,8 +123,8 @@ class ScannerDevice:
 
         # 1) 스캔 설정 (실패해도 진행)
         try:
-            self.source.SetCapability(twain.ICAP_XRESOLUTION, twain.TWTY_FIX32, 150.0)
-            self.source.SetCapability(twain.ICAP_YRESOLUTION, twain.TWTY_FIX32, 150.0)
+            self.source.SetCapability(twain.ICAP_XRESOLUTION, twain.TWTY_FIX32, float(self.dpi))
+            self.source.SetCapability(twain.ICAP_YRESOLUTION, twain.TWTY_FIX32, float(self.dpi))
             self.source.SetCapability(twain.ICAP_PIXELTYPE, twain.TWTY_UINT16, twain.TWPT_RGB)
         except:
             pass
