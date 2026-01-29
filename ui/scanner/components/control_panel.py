@@ -94,7 +94,7 @@ class ControlPanel(QWidget):
         self.btn_scan = HoverShadowButton("📄 현재시험실 스캔(R)"); self.btn_scan.setStyleSheet(style_blue)
         self.btn_check = HoverShadowButton("✔️ 오류미확인 점검(A)"); self.btn_check.setStyleSheet(style_green)
         self.btn_next = HoverShadowButton("▶ 다음시험실 스캔(N)"); self.btn_next.setStyleSheet(style_blue)
-        self.btn_demo = HoverShadowButton("📂 테스트 이미지 불러오기")
+        self.btn_demo = HoverShadowButton("📂 이미지 불러오기")
         self.btn_stop = HoverShadowButton("⏹ 스캔중단/종료(E)"); self.btn_stop.setStyleSheet(style_red)
         self.btn_retry = HoverShadowButton("↻ 재시도(T)"); self.btn_retry.setStyleSheet(style_blue)
         self.btn_retry.setEnabled(False)

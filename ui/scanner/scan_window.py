@@ -2,10 +2,10 @@ import os
 import cv2
 import numpy as np
 from PySide2.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
-                             QLabel, QFrame, QGroupBox, QComboBox, QSplitter,
+                             QLabel, QFrame, QGroupBox, QComboBox, QSplitter, QPushButton,
                              QTableWidget, QHeaderView, QAbstractItemView, QMessageBox, QTableWidgetItem,
                              QFileDialog, QProgressDialog, QCheckBox, QMenu, QInputDialog, QApplication, QDialog)
-from PySide2.QtCore import Qt, Slot, Signal, QThread, QObject, QRunnable, QThreadPool, QTimer
+from PySide2.QtCore import Qt, Slot, Signal, QThread, QObject, QRunnable, QThreadPool, QTimer, QSignalBlocker
 from PySide2.QtGui import QPixmap, QImage
 
 
@@ -156,6 +156,94 @@ class AnalyzeTask(QRunnable):
         except Exception as e:
             self.signals.error.emit(str(e))
 
+class ReviewSummarySignals(QObject):
+    result = Signal(int, int, int, int, int, int, int)  # total, review, blank, dup, invalid, roster_missing, absent
+    error = Signal(str)
+
+
+class ReviewSummaryTask(QRunnable):
+    def __init__(self, db, db_path, start_read_num, end_read_num):
+        super().__init__()
+        self.db = db
+        self.db_path = db_path
+        self.start = start_read_num
+        self.end = end_read_num
+        self.signals = ReviewSummarySignals()
+
+    def run(self):
+        try:
+            rows = self.db.get_scans_in_range(self.db_path, self.start, self.end)
+            roster_rows = self.db.load_roster(self.db_path)
+        except Exception as e:
+            self.signals.error.emit(str(e))
+            return
+
+        roster_by_exam = {str(r[0]).strip(): r for r in roster_rows if r and len(r) > 0}
+
+        total_in_session = 0
+        review_count = 0
+        blank_cnt = 0
+        dup_cnt = 0
+        invalid_cnt = 0
+        roster_missing_cnt = 0
+        absent_cnt = 0
+
+        for row in rows:
+            read_num = row[0]
+            total_in_session += 1
+
+            mark_result = str(row[1] or "")
+            is_valid = row[2]
+            exam_no = str(row[3] or "").strip()
+
+            needs_review = False
+            if is_valid == 0:
+                needs_review = True
+                invalid_cnt += 1
+            if "0" in mark_result or "3" in mark_result:
+                needs_review = True
+                if "3" in mark_result:
+                    dup_cnt += 1
+                if mark_result.replace("0", "") == "":
+                    blank_cnt += 1
+
+            lookup_key = exam_no if exam_no else str(read_num)
+            roster = roster_by_exam.get(lookup_key)
+            if roster is None:
+                needs_review = True
+                roster_missing_cnt += 1
+            else:
+                attendance = str(roster[6]).strip() if len(roster) > 6 else ""
+                if attendance and attendance in ("미응시", "결시", "불참", "N", "NO", "0"):
+                    needs_review = True
+                    absent_cnt += 1
+
+            if needs_review:
+                review_count += 1
+
+        self.signals.result.emit(total_in_session, review_count, blank_cnt, dup_cnt, invalid_cnt, roster_missing_cnt, absent_cnt)
+
+
+class SummarySignals(QObject):
+    result = Signal(list, int, int, int)  # summary_rows, total, normal, error
+    error = Signal(str)
+
+
+class SummaryTask(QRunnable):
+    def __init__(self, db, db_path):
+        super().__init__()
+        self.db = db
+        self.db_path = db_path
+        self.signals = SummarySignals()
+
+    def run(self):
+        try:
+            summary_rows = self.db.get_summary_by_scanner(self.db_path)
+            total, normal, error = self.db.get_statistics(self.db_path)
+            self.signals.result.emit(summary_rows, total, normal, error)
+        except Exception as e:
+            self.signals.error.emit(str(e))
+
 
 # =========================================================
 # [메인 스캔 화면]
@@ -184,6 +272,12 @@ class ScannerReadingView(QWidget):
         self.show_error_popups = True
         self.current_summary_row = None
         self.session_start_room_text = None
+        self._summary_refresh_timer = QTimer(self)
+        self._summary_refresh_timer.setSingleShot(True)
+        self._summary_refresh_timer.timeout.connect(self._refresh_summary_async)
+        self._summary_task_running = False
+        self._summary_refresh_pending = False
+        self._grid_block_changes = False
 
         self.pipeline = ScanPipeline()
 
@@ -227,6 +321,36 @@ class ScannerReadingView(QWidget):
         self.summary_table.selectRow(row)
         self.current_summary_row = row
 
+    def _find_summary_row(self, place_text: str, room_text: str):
+        for r in range(self.summary_table.rowCount()):
+            place_item = self.summary_table.item(r, 0)
+            room_item = self.summary_table.item(r, 1)
+            if not place_item or not room_item:
+                continue
+            if place_item.text() == str(place_text) and room_item.text() == str(room_text):
+                return r
+        return None
+
+    def _upsert_summary_count(self, place_text: str, room_text: str, add_count: int):
+        row = self._find_summary_row(place_text, room_text)
+        if row is None:
+            row = self.summary_table.rowCount()
+            self.summary_table.insertRow(row)
+            self.summary_table.setItem(row, 0, self._item(place_text))
+            self.summary_table.setItem(row, 1, self._item(room_text))
+            self.summary_table.setItem(row, 2, self._item("0"))
+        item = self.summary_table.item(row, 2)
+        try:
+            current = int(item.text()) if item else 0
+        except Exception:
+            current = 0
+        new_count = max(0, current + int(add_count))
+        if item is None:
+            self.summary_table.setItem(row, 2, self._item(str(new_count)))
+        else:
+            item.setText(str(new_count))
+        self._sort_summary_table()
+
     def _update_summary_count(self):
         if self.current_summary_row is None:
             return
@@ -235,6 +359,63 @@ class ScannerReadingView(QWidget):
             self.summary_table.setItem(self.current_summary_row, 2, self._item(str(self.current_session_count)))
         else:
             item.setText(str(self.current_session_count))
+
+    def _sort_summary_table(self):
+        if self.summary_table.rowCount() == 0:
+            return
+        selected_key = None
+        sel = self.summary_table.selectionModel()
+        if sel and sel.hasSelection():
+            row = sel.selectedRows()[0].row()
+            place_item = self.summary_table.item(row, 0)
+            room_item = self.summary_table.item(row, 1)
+            if place_item and room_item:
+                selected_key = (place_item.text(), room_item.text())
+
+        rows = []
+        for r in range(self.summary_table.rowCount()):
+            place_item = self.summary_table.item(r, 0)
+            room_item = self.summary_table.item(r, 1)
+            count_item = self.summary_table.item(r, 2)
+            if not place_item or not room_item:
+                continue
+            place_text = place_item.text()
+            room_text = room_item.text()
+            count_text = count_item.text() if count_item else "0"
+            rows.append((place_text, room_text, count_text))
+
+        def _room_key(v):
+            try:
+                return int(str(v).strip())
+            except Exception:
+                return str(v)
+
+        rows.sort(key=lambda r: (str(r[0]), _room_key(r[1])))
+
+        self.summary_table.setUpdatesEnabled(False)
+        self.summary_table.blockSignals(True)
+        try:
+            self.summary_table.setRowCount(0)
+            for place_text, room_text, count_text in rows:
+                row = self.summary_table.rowCount()
+                self.summary_table.insertRow(row)
+                self.summary_table.setItem(row, 0, self._item(place_text))
+                self.summary_table.setItem(row, 1, self._item(room_text))
+                self.summary_table.setItem(row, 2, self._item(count_text))
+            if self.summary_table.rowCount() > 0:
+                target_row = 0
+                if selected_key:
+                    for r in range(self.summary_table.rowCount()):
+                        place_item = self.summary_table.item(r, 0)
+                        room_item = self.summary_table.item(r, 1)
+                        if place_item and room_item and (place_item.text(), room_item.text()) == selected_key:
+                            target_row = r
+                            break
+                self.summary_table.selectRow(target_row)
+                self.current_summary_row = target_row
+        finally:
+            self.summary_table.blockSignals(False)
+            self.summary_table.setUpdatesEnabled(True)
 
     # -------------------------------------------------------------------------
         # [1] UI 작성
@@ -397,10 +578,18 @@ class ScannerReadingView(QWidget):
         self.main_grid = DataGrid()
         self.main_grid.setContextMenuPolicy(Qt.CustomContextMenu)
         self.main_grid.customContextMenuRequested.connect(self._on_grid_context_menu)
+        self.main_grid.itemChanged.connect(self._on_main_grid_item_changed)
         self.control_panel = ControlPanel()
 
         splitter.addWidget(self.summary_table)
-        splitter.addWidget(self.main_grid)
+        main_grid_container = QWidget()
+        grid_layout = QVBoxLayout(main_grid_container)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.setSpacing(4)
+
+
+        grid_layout.addWidget(self.main_grid)
+        splitter.addWidget(main_grid_container)
         splitter.addWidget(self.control_panel)
         splitter.setSizes([200, 1200, 260])
         splitter.setCollapsible(2, False)
@@ -498,15 +687,24 @@ class ScannerReadingView(QWidget):
             
             elif exit_code == 1:  # 저장(S) -> 다음으로
                 self.save_corrected_data(row, dlg.scan_results)
-                current_idx += 1  # 다음 이동
+                self.db.update_review_done(self.current_db_path, read_num, 1)
+                self._refresh_grid_row_by_read_num(read_num)
+                next_idx = self._find_next_unreviewed_index(current_idx + 1, 1)
+                if next_idx is None:
+                    break
+                current_idx = next_idx  # 미점검 다음 항목으로 이동
 
             elif exit_code == 2:  # 이전 (<) -> 저장하지 않고 이전으로
+                self.db.update_review_done(self.current_db_path, read_num, 1)
+                self._refresh_grid_row_by_read_num(read_num)
                 current_idx -= 1
                 if current_idx < 0:
                     QMessageBox.information(self, "알림", "첫 번째 항목입니다.")
                     current_idx = 0
 
             elif exit_code == 3:  # 다음 (>) -> 저장하지 않고 다음으로
+                self.db.update_review_done(self.current_db_path, read_num, 1)
+                self._refresh_grid_row_by_read_num(read_num)
                 current_idx += 1
 
         # 루프 종료 후 통계 갱신
@@ -514,6 +712,18 @@ class ScannerReadingView(QWidget):
         if current_idx >= len(self.error_queue):
              return True
         return False
+
+    def _find_next_unreviewed_index(self, start_idx: int, direction: int = 1):
+        idx = start_idx
+        while 0 <= idx < len(self.error_queue):
+            row = self.error_queue[idx]
+            read_num = row[1]
+            db_row = self.db.get_scan_by_read_num(self.current_db_path, read_num)
+            review_done = db_row[13] if db_row and len(db_row) > 13 else 0
+            if not review_done:
+                return idx
+            idx += direction
+        return None
 
     def parse_result_string(self, result_str):
         """문자열 '103'을 다이얼로그용 리스트로 변환"""
@@ -562,6 +772,15 @@ class ScannerReadingView(QWidget):
 
         # 2. 원본 데이터 업데이트 (강제 유효=1)
         self.db.update_scan_result(self.current_db_path, read_num, new_result_str, 1)
+        self.db.update_scan_meta(self.current_db_path, read_num, scanner_name=None, room_no=None, image_path=None)
+        try:
+            with self.db._get_conn(self.current_db_path) as conn:
+                cur = conn.cursor()
+                cur.execute("UPDATE tblScanData SET error_message = ? WHERE read_num = ?", ("", read_num))
+                conn.commit()
+        except Exception:
+            pass
+        self.db.update_review_done(self.current_db_path, read_num, 1)
 
     def _item(self, text):
         """아이템 데이터 생성 헬퍼"""
@@ -615,6 +834,12 @@ class ScannerReadingView(QWidget):
         if exit_code == 1:
             self.save_corrected_data(row_data, dlg.scan_results)
             self.update_statistics()
+            self._schedule_summary_refresh()
+            self.db.update_review_done(self.current_db_path, read_num, 1)
+            self._refresh_grid_row_by_read_num(read_num)
+        elif exit_code in (2, 3):
+            self.db.update_review_done(self.current_db_path, read_num, 1)
+            self._refresh_grid_row_by_read_num(read_num)
 
     def _delete_rows(self, delete_images: bool):
         read_nums = self._get_selected_read_nums()
@@ -634,6 +859,146 @@ class ScannerReadingView(QWidget):
         for r in reversed(self._get_selected_rows()):
             self.main_grid.removeRow(r)
         self.update_statistics()
+        self._schedule_summary_refresh()
+
+    def _refresh_summary_async(self):
+        if not self.current_db_path:
+            return
+        if self._summary_task_running:
+            self._summary_refresh_pending = True
+            return
+        self._summary_task_running = True
+        task = SummaryTask(self.db, self.current_db_path)
+        task.signals.result.connect(self._apply_summary_data)
+        task.signals.error.connect(self._on_summary_error)
+        self.thread_pool.start(task)
+
+    def _apply_summary_data(self, summary_rows, total, normal, error):
+        self._summary_task_running = False
+        if self._summary_refresh_pending:
+            self._summary_refresh_pending = False
+            self._schedule_summary_refresh(0)
+        self.total_read = total
+        self.lbl_total.setText(str(total))
+        self.lbl_check.setText(str(error))
+        self.control_panel.txt_temp.setText(str(total))
+
+        counts = {(str(r[0]), str(r[1])): r[2] for r in summary_rows}
+
+        self.summary_table.setUpdatesEnabled(False)
+        for r in range(self.summary_table.rowCount()):
+            place_item = self.summary_table.item(r, 0)
+            room_item = self.summary_table.item(r, 1)
+            if not place_item or not room_item:
+                continue
+            key = (place_item.text(), room_item.text())
+            count = counts.get(key, 0)
+            item = self.summary_table.item(r, 2)
+            if item is None:
+                self.summary_table.setItem(r, 2, self._item(str(count)))
+            else:
+                item.setText(str(count))
+        self.summary_table.setUpdatesEnabled(True)
+
+        sel = self.summary_table.selectionModel()
+        if sel and sel.hasSelection():
+            row = sel.selectedRows()[0].row()
+            count_item = self.summary_table.item(row, 2)
+            self.lbl_cur_cnt.setText(count_item.text() if count_item else "0")
+
+    def _on_summary_error(self, msg):
+        self._summary_task_running = False
+        if self._summary_refresh_pending:
+            self._summary_refresh_pending = False
+        self._set_last_error_message(msg)
+
+    def _schedule_summary_refresh(self, delay_ms=300):
+        if self._summary_refresh_timer.isActive():
+            self._summary_refresh_timer.stop()
+        self._summary_refresh_timer.start(delay_ms)
+
+    def _load_summary_from_db(self):
+        if not self.current_db_path:
+            return
+        try:
+            summary_rows = self.db.get_summary_by_scanner(self.current_db_path)
+        except Exception:
+            summary_rows = []
+
+        if not summary_rows:
+            summary_rows = []
+
+        selected_key = None
+        sel = self.summary_table.selectionModel()
+        if sel and sel.hasSelection():
+            row = sel.selectedRows()[0].row()
+            place_item = self.summary_table.item(row, 0)
+            room_item = self.summary_table.item(row, 1)
+            if place_item and room_item:
+                selected_key = (place_item.text(), room_item.text())
+
+        self.summary_table.setUpdatesEnabled(False)
+        self.summary_table.blockSignals(True)
+        try:
+            self.summary_table.setRowCount(0)
+            def _room_key(v):
+                try:
+                    return int(str(v).strip())
+                except Exception:
+                    return str(v)
+
+            for scanner_name, room_no, count, _ in sorted(
+                summary_rows, key=lambda r: (str(r[0]), _room_key(r[1]))
+            ):
+                row = self.summary_table.rowCount()
+                self.summary_table.insertRow(row)
+                self.summary_table.setItem(row, 0, self._item(str(scanner_name)))
+                self.summary_table.setItem(row, 1, self._item(str(room_no)))
+                self.summary_table.setItem(row, 2, self._item(str(count)))
+
+            if self.summary_table.rowCount() > 0:
+                target_row = 0
+                if selected_key:
+                    for r in range(self.summary_table.rowCount()):
+                        place_item = self.summary_table.item(r, 0)
+                        room_item = self.summary_table.item(r, 1)
+                        if place_item and room_item and (place_item.text(), room_item.text()) == selected_key:
+                            target_row = r
+                            break
+                self.summary_table.selectRow(target_row)
+        finally:
+            self.summary_table.blockSignals(False)
+            self.summary_table.setUpdatesEnabled(True)
+
+        if self.summary_table.rowCount() > 0:
+            place_item = self.summary_table.item(self.summary_table.currentRow(), 0)
+            room_item = self.summary_table.item(self.summary_table.currentRow(), 1)
+            if place_item and room_item:
+                        self.reload_grid_from_db(place=place_item.text(), room=room_item.text())
+        else:
+            self.main_grid.setRowCount(0)
+            self.lbl_cur_cnt.setText("0")
+
+    def _on_main_grid_item_changed(self, item):
+        if self._grid_block_changes or not self.current_db_path or item is None:
+            return
+        row = item.row()
+        col = item.column()
+        if col not in (2, 3):
+            return
+        read_num_item = self.main_grid.item(row, 0)
+        if not read_num_item:
+            return
+        try:
+            read_num = int(read_num_item.text())
+        except Exception:
+            return
+        text = (item.text() or "").strip()
+        if col == 2:
+            self.db.update_scan_meta(self.current_db_path, read_num, scanner_name=text)
+        else:
+            self.db.update_scan_meta(self.current_db_path, read_num, room_no=text)
+        self._schedule_summary_refresh()
 
     def _change_place_or_room(self, field_name: str):
         read_nums = self._get_selected_read_nums()
@@ -654,6 +1019,7 @@ class ScannerReadingView(QWidget):
             if item:
                 item.setText(text.strip())
         self.update_statistics()
+        self._schedule_summary_refresh()
 
     def _change_front_path(self):
         read_nums = self._get_selected_read_nums()
@@ -684,6 +1050,7 @@ class ScannerReadingView(QWidget):
         ordered_read_nums = [r[1] for r in ordered]
         self.db.renumber_read_nums(self.current_db_path, ordered_read_nums)
         self.reload_grid_from_db()
+        self._schedule_summary_refresh()
 
     def _rename_image_files(self):
         if not self.current_db_path:
@@ -707,6 +1074,7 @@ class ScannerReadingView(QWidget):
             except Exception as e:
                 print(f"파일명 변경 실패: {e}")
         self.reload_grid_from_db()
+        self._schedule_summary_refresh()
 
     def reload_grid_from_db(self, place=None, room=None):
         if not self.current_db_path:
@@ -720,32 +1088,54 @@ class ScannerReadingView(QWidget):
                 if place_item and room_item:
                     place = place_item.text()
                     room = room_item.text()
+        self._grid_block_changes = True
+        self.main_grid.setUpdatesEnabled(False)
         self.main_grid.setRowCount(0)
-        rows = self.db.get_all_scans(self.current_db_path)
+        if place is not None and room is not None:
+            rows = self.db.get_scans_by_place_room(self.current_db_path, place, room)
+        else:
+            rows = self.db.get_all_scans(self.current_db_path)
         for row in rows:
             read_num = row[1]
             row_place = row[2]
             row_room = row[3]
-            if place is not None and room is not None:
-                if str(row_place) != str(place) or str(row_room) != str(room):
-                    continue
             image_path = row[4]
             sheet_code = row[5]
             result_str = row[6]
             is_valid = row[7]
-            ui_status = "정상" if is_valid == 1 else "오류"
+            error_message = row[9] if len(row) > 9 else ""
+            review_done = row[13] if len(row) > 13 else 0
+            if is_valid == 1:
+                ui_status = ""
+                review_status = "완료" if review_done else ""
+                display_detail = ""
+            else:
+                ui_status = "오류"
+                review_status = "완료" if review_done else "미점검"
+                display_detail = error_message if error_message else result_str
             row_data = [
                 str(read_num),
                 str(sheet_code),
                 str(row_place),
                 str(row_room),
                 ui_status,
-                "완료",
-                str(result_str),
+                review_status,
+                str(display_detail),
                 str(image_path),
                 os.path.basename(image_path) if image_path else "",
             ]
             self.main_grid.add_row_data(row_data)
+            # 점검구분 색상
+            if review_status:
+                item = self.main_grid.item(self.main_grid.rowCount() - 1, 5)
+                if item:
+                    if review_status == "미점검":
+                        item.setForeground(Qt.red)
+                    elif review_status == "완료":
+                        item.setForeground(Qt.blue)
+        self._grid_block_changes = False
+        self.main_grid.setUpdatesEnabled(True)
+        self._schedule_summary_refresh()
 
     def _on_summary_selected(self):
         sel = self.summary_table.selectionModel()
@@ -759,6 +1149,12 @@ class ScannerReadingView(QWidget):
         place = place_item.text()
         room = room_item.text()
         self.reload_grid_from_db(place=place, room=room)
+
+
+
+
+
+
 
     def _find_text(self, from_current: bool):
         text, ok = QInputDialog.getText(self, "찾기", "검색어:")
@@ -846,8 +1242,14 @@ class ScannerReadingView(QWidget):
 
         try:
             self.update_statistics()
+            self._load_summary_from_db()
         except Exception as e:
             QMessageBox.critical(self, "DB 오류", f"통계 갱신 중 오류:\n{e}")
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.current_db_path and not self.scan_in_progress:
+            self._load_summary_from_db()
 
 
     # 1. 좌표 가져오기 (DB 연동 버전)
@@ -909,6 +1311,7 @@ class ScannerReadingView(QWidget):
         self.cb_form.currentIndexChanged.connect(self.on_form_changed)
         self.on_form_changed()  # 초기 1회 적용
 
+
     def on_form_changed(self):
         self.pipeline.set_form_path(self.cb_form.currentData())
 
@@ -917,7 +1320,10 @@ class ScannerReadingView(QWidget):
         self.closed_signal.emit()
 
     def run_demo_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "데모 이미지 폴더 선택")
+        if self.current_db_path is None:
+            QMessageBox.warning(self, "경고", "먼저 DB파일을 선택(파일 설정)해주세요.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "이미지 폴더 선택")
         if not folder:
             return
 
@@ -933,15 +1339,27 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_scan.setEnabled(False)
         self.control_panel.btn_check.setEnabled(False)
         self.control_panel.btn_demo.setEnabled(False)
-        self.control_panel.btn_demo.setText("데모 진행중...")
+        self.control_panel.btn_demo.setText("이미지 불러오는 중...")
 
         current_place = self.cb_place.currentText()
         current_room = self.cb_room.currentText()
         self.current_session_count = 0
+        self.session_start_read_num = self.total_read + 1
+        self.pending_results = {}
+        self.next_emit_read_num = self.session_start_read_num
+        self.pending_analyze = 0
+        self.auto_next_pending = False
+        self.current_summary_row = None
+        self.session_start_room_text = self.cb_room.currentText()
+        self.last_scan_params = {
+            "form_index": self.cb_form.currentIndex(),
+            "place_index": self.cb_place.currentIndex(),
+            "room_index": self.cb_room.currentIndex(),
+        }
 
         # 진행용 다이얼로그
-        self.demo_progress = QProgressDialog("데모 판독 준비중...", "취소", 0, len(files), self)
-        self.demo_progress.setWindowTitle("데모 진행")
+        self.demo_progress = QProgressDialog("이미지 판독 준비중...", "취소", 0, len(files), self)
+        self.demo_progress.setWindowTitle("이미지 불러오기")
         self.demo_progress.setWindowModality(Qt.WindowModal)
         self.demo_progress.setAutoClose(False)
         self.demo_progress.setAutoReset(False)
@@ -970,7 +1388,7 @@ class ScannerReadingView(QWidget):
         if hasattr(self, "demo_progress") and self.demo_progress:
             self.demo_progress.setMaximum(total)
             self.demo_progress.setValue(current)
-            self.demo_progress.setLabelText(f"데모 판독중... ({current}/{total})\n{filename}")
+            self.demo_progress.setLabelText(f"이미지 판독중... ({current}/{total})\n{filename}")
 
     def _on_demo_row(self, row_data):
         # UI에 결과 반영 (메인 스레드)
@@ -992,29 +1410,25 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_scan.setEnabled(True)
         self.control_panel.btn_check.setEnabled(True)
         self.control_panel.btn_demo.setEnabled(True)
-        self.control_panel.btn_demo.setText("📂 테스트 이미지 불러오기")
+        self.control_panel.btn_demo.setText("📂 이미지 불러오기")
 
         try:
             self.reload_grid_from_db()
             self.update_statistics()
+            self._schedule_summary_refresh()
         except Exception:
             pass
 
         place = self.cb_place.currentText()
         room = self.cb_room.currentText()
         count = str(self.current_session_count)
-        row = self.summary_table.rowCount()
-        self.summary_table.insertRow(row)
-        self.summary_table.setItem(row, 0, self._item(place))
-        self.summary_table.setItem(row, 1, self._item(room))
-        self.summary_table.setItem(row, 2, self._item(count))
-        self.summary_table.selectRow(row)
+        self._upsert_summary_count(place, room, int(count))
         self.reload_grid_from_db(place=place, room=room)
 
-        # 데모 종료 후 다음 시험실로 자동 이동
+        # 이미지 불러오기 종료 후 다음 시험실로 자동 이동
         self._advance_room()
 
-        QMessageBox.information(self, "데모 완료", f"성공 {ok} / 실패 {fail}")
+        QMessageBox.information(self, "이미지 불러오기 완료", f"성공 {ok} / 실패 {fail}")
 
     def _on_demo_error(self, msg):
         if hasattr(self, "demo_progress") and self.demo_progress:
@@ -1023,10 +1437,10 @@ class ScannerReadingView(QWidget):
         self.control_panel.btn_scan.setEnabled(True)
         self.control_panel.btn_check.setEnabled(True)
         self.control_panel.btn_demo.setEnabled(True)
-        self.control_panel.btn_demo.setText("📂 테스트 이미지 불러오기")
+        self.control_panel.btn_demo.setText("📂 이미지 불러오기")
 
         self._set_last_error_message(msg)
-        self._show_error_popup("데모 오류", msg, critical=True)
+        self._show_error_popup("이미지 불러오기 오류", msg, critical=True)
 
 
 
@@ -1185,88 +1599,103 @@ class ScannerReadingView(QWidget):
 
     def update_statistics(self):
         """DB 통계(총매수, 오류매수) 갱신"""
-        if not self.current_db_path: return
-        total, normal, error = self.db.get_statistics(self.current_db_path)
-        
-        self.total_read = total
-        self.lbl_total.setText(str(total))
-        self.lbl_check.setText(str(error)) 
-        self.control_panel.txt_temp.setText(str(total))
+        if not self.current_db_path:
+            return
+        self._refresh_summary_async()
 
     def update_review_summary(self):
         if not self.current_db_path:
             return
-        try:
-            rows = self.db.get_scans_in_range(self.current_db_path, self.session_start_read_num, self.total_read)
-            roster_rows = self.db.load_roster(self.current_db_path)
-        except Exception:
-            return
+        task = ReviewSummaryTask(
+            self.db,
+            self.current_db_path,
+            self.session_start_read_num,
+            self.total_read,
+        )
+        task.signals.result.connect(self._apply_review_summary)
+        task.signals.error.connect(self._on_summary_error)
+        self.thread_pool.start(task)
 
-        roster_by_exam = {str(r[0]).strip(): r for r in roster_rows if r and len(r) > 0}
-
-        start = self.session_start_read_num
-        end = self.total_read
-
-        total_in_session = 0
-        review_count = 0
-        blank_cnt = 0
-        dup_cnt = 0
-        invalid_cnt = 0
-        roster_missing_cnt = 0
-        absent_cnt = 0
-
-        for row in rows:
-            read_num = row[0]
-            total_in_session += 1
-
-            mark_result = str(row[1] or "")
-            is_valid = row[2]
-            exam_no = str(row[3] or "").strip()
-
-            needs_review = False
-            if is_valid == 0:
-                needs_review = True
-                invalid_cnt += 1
-            if "0" in mark_result or "3" in mark_result:
-                needs_review = True
-                if "3" in mark_result:
-                    dup_cnt += 1
-                if mark_result.replace("0", "") == "":
-                    blank_cnt += 1
-
-            lookup_key = exam_no if exam_no else str(read_num)
-            roster = roster_by_exam.get(lookup_key)
-            if roster is None:
-                needs_review = True
-                roster_missing_cnt += 1
-            else:
-                attendance = str(roster[6]).strip() if len(roster) > 6 else ""
-                if attendance and attendance in ("미응시", "결시", "불참", "N", "NO", "0"):
-                    needs_review = True
-                    absent_cnt += 1
-
-            if needs_review:
-                review_count += 1
-
+    def _apply_review_summary(self, total_in_session, review_count, blank_cnt, dup_cnt, invalid_cnt, roster_missing_cnt, absent_cnt):
         if total_in_session > 0:
             self.lbl_check.setText(f"{review_count}/{total_in_session}")
             self.lbl_review_detail.setText(
-                f"오류:{invalid_cnt}  중복:{dup_cnt}  공백:{blank_cnt}  "
-                f"명단미매칭:{roster_missing_cnt}  결시:{absent_cnt}"
+                f"오류:{invalid_cnt}  중복:{dup_cnt}  공란:{blank_cnt}  "
+                f"명단미등록:{roster_missing_cnt}  결시:{absent_cnt}"
             )
 
-    @Slot()
+    def _update_review_status_in_grid(self, read_num: int, status: str):
+        for r in range(self.main_grid.rowCount()):
+            item = self.main_grid.item(r, 0)
+            if item and item.text() == str(read_num):
+                cell = self.main_grid.item(r, 5)
+                if cell:
+                    cell.setText(status)
+                    if status == "미점검":
+                        cell.setForeground(Qt.red)
+                    elif status == "완료":
+                        cell.setForeground(Qt.blue)
+                break
+
+    def _refresh_grid_row_by_read_num(self, read_num: int):
+        if not self.current_db_path:
+            return
+        row = self.db.get_scan_by_read_num(self.current_db_path, read_num)
+        if not row:
+            return
+        row_place = row[2]
+        row_room = row[3]
+        image_path = row[4]
+        sheet_code = row[5]
+        result_str = row[6]
+        is_valid = row[7]
+        error_message = row[9] if len(row) > 9 else ""
+        review_done = row[13] if len(row) > 13 else 0
+
+        if is_valid == 1:
+            ui_status = ""
+            review_status = "완료" if review_done else ""
+            display_detail = ""
+        else:
+            ui_status = "오류"
+            review_status = "완료" if review_done else "미점검"
+            display_detail = error_message if error_message else result_str
+
+        for r in range(self.main_grid.rowCount()):
+            item = self.main_grid.item(r, 0)
+            if item and item.text() == str(read_num):
+                values = [
+                    str(read_num),
+                    str(sheet_code),
+                    str(row_place),
+                    str(row_room),
+                    ui_status,
+                    review_status,
+                    str(display_detail),
+                    str(image_path),
+                    os.path.basename(image_path) if image_path else "",
+                ]
+                for c, value in enumerate(values):
+                    cell = self.main_grid.item(r, c)
+                    if not cell:
+                        cell = self._item("")
+                        self.main_grid.setItem(r, c, cell)
+                    cell.setText(value)
+                status_cell = self.main_grid.item(r, 5)
+                if status_cell:
+                    if review_status == "미점검":
+                        status_cell.setForeground(Qt.red)
+                    elif review_status == "완료":
+                        status_cell.setForeground(Qt.blue)
+                break
+
+
     def on_finished(self):
         # [수정] 좌측 요약 테이블 갱신
         place = self.cb_place.currentText()
         room = self.cb_room.currentText()
         count = str(self.current_session_count)
-        row = self.summary_table.rowCount()
-        self.summary_table.insertRow(row)
-        self.summary_table.setItem(row, 0, self._item(place))
-        self.summary_table.setItem(row, 1, self._item(room))
-        self.summary_table.setItem(row, 2, self._item(count))
-        self.summary_table.selectRow(row)
+        self._upsert_summary_count(place, room, int(count))
         self.current_summary_row = None
         self.reload_grid_from_db(place=place, room=room)
         
@@ -1364,4 +1793,3 @@ class ScannerReadingView(QWidget):
             self.cb_room.setCurrentIndex(current_idx + 1)
             # currentTextChanged 시그널로 라벨 자동 갱신
             self.lbl_cur_room.setText(self.cb_room.currentText())
-

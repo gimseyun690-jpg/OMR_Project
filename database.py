@@ -70,9 +70,11 @@ class DBManager:
             mark_result TEXT,
             is_valid INTEGER DEFAULT 1,
             scan_time TEXT,
+            error_message TEXT,
             exam_no TEXT,
             birth TEXT,
-            subject TEXT
+            subject TEXT,
+            review_done INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS tblRoster (
@@ -123,6 +125,10 @@ class DBManager:
 
         CREATE INDEX IF NOT EXISTS idx_scan_readnum
             ON tblScanData(read_num);
+        CREATE INDEX IF NOT EXISTS idx_scan_place_room
+            ON tblScanData(scanner_name, room_no);
+        CREATE INDEX IF NOT EXISTS idx_scan_is_valid
+            ON tblScanData(is_valid);
 
         CREATE INDEX IF NOT EXISTS idx_manual_edits_readnum
             ON manual_edits(read_num);
@@ -157,8 +163,8 @@ class DBManager:
             self._ensure_scan_columns(conn)
             cur.execute("""
                 INSERT INTO tblScanData
-                (read_num, scanner_name, room_no, image_path, sheet_code, mark_result, is_valid, scan_time, exam_no, birth, subject)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (read_num, scanner_name, room_no, image_path, sheet_code, mark_result, is_valid, scan_time, error_message, exam_no, birth, subject, review_done)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data.get("read_num"),
                 data.get("place"),
@@ -168,20 +174,64 @@ class DBManager:
                 data.get("mark_result"),
                 data.get("is_valid", 1),
                 created_at,
+                data.get("error_message"),
                 data.get("exam_no"),
                 data.get("birth"),
                 data.get("subject"),
+                data.get("review_done", 0),
             ))
             conn.commit()
 
     def _ensure_scan_columns(self, conn):
         cur = conn.cursor()
         cur.execute("PRAGMA table_info(tblScanData)")
-        cols = {row[1] for row in cur.fetchall()}
-        for name, col_type in (("exam_no", "TEXT"), ("birth", "TEXT"), ("subject", "TEXT")):
+        rows = cur.fetchall()
+        cols = {row[1] for row in rows}
+        if not cols:
+            cur.executescript("""
+                CREATE TABLE IF NOT EXISTS tblScanData (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    read_num INTEGER,
+                    scanner_name TEXT,
+                    room_no TEXT,
+                    image_path TEXT,
+                    sheet_code TEXT,
+                    mark_result TEXT,
+                    is_valid INTEGER DEFAULT 1,
+                    scan_time TEXT,
+                    error_message TEXT,
+                    exam_no TEXT,
+                    birth TEXT,
+                    subject TEXT,
+                    review_done INTEGER DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_scan_readnum
+                    ON tblScanData(read_num);
+                CREATE INDEX IF NOT EXISTS idx_scan_place_room
+                    ON tblScanData(scanner_name, room_no);
+                CREATE INDEX IF NOT EXISTS idx_scan_is_valid
+                    ON tblScanData(is_valid);
+            """)
+            conn.commit()
+            cur.execute("PRAGMA table_info(tblScanData)")
+            rows = cur.fetchall()
+            cols = {row[1] for row in rows}
+        for name, col_type in (
+            ("error_message", "TEXT"),
+            ("exam_no", "TEXT"),
+            ("birth", "TEXT"),
+            ("subject", "TEXT"),
+            ("review_done", "INTEGER"),
+        ):
             if name not in cols:
                 cur.execute(f"ALTER TABLE tblScanData ADD COLUMN {name} {col_type}")
         conn.commit()
+
+    def update_review_done(self, db_path, read_num, done: int):
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE tblScanData SET review_done = ? WHERE read_num = ?", (int(done), read_num))
+            conn.commit()
 
     def _ensure_roster_columns(self, conn):
         cur = conn.cursor()
@@ -235,27 +285,23 @@ class DBManager:
     # ========================================================
     def update_scan_result(self, db_path, read_num, mark_result, is_valid):
         """수정된 결과를 DB에 반영"""
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        sql = "UPDATE tblScanData SET mark_result = ?, is_valid = ? WHERE read_num = ?"
-        cursor.execute(sql, (mark_result, is_valid, read_num))
-        conn.commit()
-        conn.close()
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            sql = "UPDATE tblScanData SET mark_result = ?, is_valid = ? WHERE read_num = ?"
+            cursor.execute(sql, (mark_result, is_valid, read_num))
+            conn.commit()
 
     def get_scan_by_read_num(self, db_path, read_num):
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM tblScanData WHERE read_num = ?", (read_num,))
-        row = cursor.fetchone()
-        conn.close()
-        return row
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM tblScanData WHERE read_num = ?", (read_num,))
+            return cursor.fetchone()
 
     def delete_scan_result(self, db_path, read_num):
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM tblScanData WHERE read_num = ?", (read_num,))
-        conn.commit()
-        conn.close()
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM tblScanData WHERE read_num = ?", (read_num,))
+            conn.commit()
 
     def update_scan_meta(self, db_path, read_num, scanner_name=None, room_no=None, image_path=None):
         fields = []
@@ -272,86 +318,115 @@ class DBManager:
         if not fields:
             return
         values.append(read_num)
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        sql = f"UPDATE tblScanData SET {', '.join(fields)} WHERE read_num = ?"
-        cursor.execute(sql, values)
-        conn.commit()
-        conn.close()
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            sql = f"UPDATE tblScanData SET {', '.join(fields)} WHERE read_num = ?"
+            cursor.execute(sql, values)
+            conn.commit()
 
     def renumber_read_nums(self, db_path, ordered_read_nums):
         """
         ordered_read_nums: [old_read_num, ...] 순서대로 1..N 부여
         """
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        for new_num, old_num in enumerate(ordered_read_nums, start=1):
-            cursor.execute("UPDATE tblScanData SET read_num = ? WHERE read_num = ?", (new_num, old_num))
-        conn.commit()
-        conn.close()
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            for new_num, old_num in enumerate(ordered_read_nums, start=1):
+                cursor.execute("UPDATE tblScanData SET read_num = ? WHERE read_num = ?", (new_num, old_num))
+            conn.commit()
 
     def get_all_scans(self, db_path):
         """모든 스캔 데이터 가져오기"""
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        self._ensure_scan_columns(conn)
-        cursor.execute("SELECT * FROM tblScanData ORDER BY read_num ASC")
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            self._ensure_scan_columns(conn)
+            cursor.execute("SELECT * FROM tblScanData ORDER BY read_num ASC")
+            return cursor.fetchall()
+
+    def get_scan_count(self, db_path):
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM tblScanData")
+            return cursor.fetchone()[0]
+
+    def get_scan_count_by_place_room(self, db_path, place, room):
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM tblScanData WHERE scanner_name = ? AND room_no = ?",
+                (place, room),
+            )
+            return cursor.fetchone()[0]
+
+    def get_scans_page(self, db_path, limit, offset=0):
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            self._ensure_scan_columns(conn)
+            cursor.execute(
+                "SELECT * FROM tblScanData ORDER BY read_num ASC LIMIT ? OFFSET ?",
+                (limit, offset),
+            )
+            return cursor.fetchall()
+
+    def get_scans_by_place_room(self, db_path, place, room, limit=None, offset=0):
+        """고사장/시험실 필터 조회 (대량 데이터 대비)"""
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            self._ensure_scan_columns(conn)
+            sql = """
+                SELECT * FROM tblScanData
+                WHERE scanner_name = ? AND room_no = ?
+                ORDER BY read_num ASC
+            """
+            params = [place, room]
+            if limit is not None:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+            cursor.execute(sql, params)
+            return cursor.fetchall()
 
     def get_scans_in_range(self, db_path, start_read_num, end_read_num):
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        self._ensure_scan_columns(conn)
-        cursor.execute("""
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            self._ensure_scan_columns(conn)
+            cursor.execute("""
             SELECT read_num, mark_result, is_valid, exam_no
             FROM tblScanData
             WHERE read_num BETWEEN ? AND ?
             ORDER BY read_num ASC
-        """, (start_read_num, end_read_num))
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
+            """, (start_read_num, end_read_num))
+            return cursor.fetchall()
 
     def get_statistics(self, db_path):
         """통계 계산 (총매수, 정상, 오류)"""
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT COUNT(*) FROM tblScanData")
-        total = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM tblScanData WHERE is_valid=1")
-        normal = cursor.fetchone()[0]
-        
-        cursor.execute("SELECT COUNT(*) FROM tblScanData WHERE is_valid=0")
-        error = cursor.fetchone()[0]
-        
-        conn.close()
-        return total, normal, error
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM tblScanData")
+            total = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM tblScanData WHERE is_valid=1")
+            normal = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM tblScanData WHERE is_valid=0")
+            error = cursor.fetchone()[0]
+            return total, normal, error
 
     def get_summary_by_scanner(self, db_path):
         """[판독매수 화면] 고사장/시험실별 집계"""
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        sql = '''
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            sql = '''
             SELECT scanner_name, room_no, COUNT(*), SUM(CASE WHEN is_valid=0 THEN 1 ELSE 0 END)
             FROM tblScanData
             GROUP BY scanner_name, room_no
-        '''
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
+            '''
+            cursor.execute(sql)
+            return cursor.fetchall()
 
     def get_vote_counts(self, db_path, q_count=5):
         """[개표결과 화면] 문항별 득표수 계산"""
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT mark_result FROM tblScanData WHERE is_valid=1")
-        rows = cursor.fetchall()
-        conn.close()
+        with self._get_conn(db_path) as conn:
+            self._ensure_scan_columns(conn)
+            cursor = conn.cursor()
+            cursor.execute("SELECT mark_result FROM tblScanData WHERE is_valid=1")
+            rows = cursor.fetchall()
 
         stats = {i+1: {'1': 0, '2': 0, '0': 0, '3': 0} for i in range(q_count)}
 
@@ -364,34 +439,43 @@ class DBManager:
 
     def get_raw_data_for_grid(self, db_path):
         """[판독자료 화면] 전체 데이터 리스트"""
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT read_num, sheet_code, mark_result, image_path FROM tblScanData ORDER BY read_num ASC")
-        rows = cursor.fetchall()
-        conn.close()
-        return rows
+        with self._get_conn(db_path) as conn:
+            self._ensure_scan_columns(conn)
+            cursor = conn.cursor()
+            cursor.execute("SELECT read_num, sheet_code, mark_result, image_path FROM tblScanData ORDER BY read_num ASC")
+            return cursor.fetchall()
     
     def get_setting(self, db_path, key, default_value=""):
         """설정값 불러오기"""
         try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT value FROM tblSettings WHERE key=?", (key,))
-            row = cursor.fetchone()
-            conn.close()
-            return row[0] if row else default_value
+            with self._get_conn(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS tblSettings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                    )
+                """)
+                cursor.execute("SELECT value FROM tblSettings WHERE key=?", (key,))
+                row = cursor.fetchone()
+                return row[0] if row else default_value
         except:
             return default_value
 
     def save_setting(self, db_path, key, value):
         """설정값 저장하기 (없으면 생성, 있으면 수정)"""
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        # UPSERT 방식 (SQLite 지원 버전에 따라 다를 수 있어 삭제 후 삽입 방식 사용)
-        cursor.execute("DELETE FROM tblSettings WHERE key=?", (key,))
-        cursor.execute("INSERT INTO tblSettings (key, value) VALUES (?, ?)", (key, str(value)))
-        conn.commit()
-        conn.close()
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS tblSettings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            # UPSERT 방식 (SQLite 지원 버전에 따라 다를 수 있어 삭제 후 삽입 방식 사용)
+            cursor.execute("DELETE FROM tblSettings WHERE key=?", (key,))
+            cursor.execute("INSERT INTO tblSettings (key, value) VALUES (?, ?)", (key, str(value)))
+            conn.commit()
 
     # ========================================================
     # [추가] 명단/정답 입력 저장 및 조회

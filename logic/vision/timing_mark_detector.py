@@ -104,11 +104,6 @@ def detect_timing_marks(img_bgr: np.ndarray) -> Tuple[Dict[str, Point], Dict]:
     
     # 5. 서브픽셀 정밀 보정 (선택 사항: 더 정확한 좌표를 원하면 활성화)
     # gray_img에서 final_pts 주변을 미세 탐색하여 0.1픽셀 단위로 보정
-    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-    for k, pt in final_pts.items():
-        pts_vec = np.array([[pt[0], pt[1]]], dtype=np.float32)
-        cv2.cornerSubPix(gray, pts_vec, (5, 5), (-1, -1), criteria)
-        final_pts[k] = (int(pts_vec[0][0]), int(pts_vec[0][1]))
 
     debug['ok'] = True
     debug['corners'] = final_pts

@@ -68,6 +68,7 @@ class HomeCard(QWidget):
     def __init__(self, title: str, subtitle: str, icon):
         super().__init__()
         self.setObjectName("homeCard")
+        self.setProperty("selected", False)
         self.setCursor(Qt.PointingHandCursor)
         self.setAttribute(Qt.WA_Hover, True)
         self.setAttribute(Qt.WA_StyledBackground, True)
@@ -106,6 +107,12 @@ class HomeCard(QWidget):
             self.clicked.emit()
             event.accept()
         super().mouseReleaseEvent(event)
+
+    def setSelected(self, selected: bool):
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
 
 
 class HoverGroupBox(QGroupBox):
@@ -159,6 +166,9 @@ class HomeInterface(QWidget):
     open_file_settings = Signal()
     open_coord_settings = Signal()
     open_env_settings = Signal(QPoint)
+    open_exam_results = Signal()
+    open_church_results = Signal()
+    open_rebuild_results = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -209,16 +219,19 @@ class HomeInterface(QWidget):
             _icon("DOCUMENT"),
         )
 
-        self.card_file.clicked.connect(self.open_file_settings.emit)
-        self.card_coord.clicked.connect(self.open_coord_settings.emit)
-        self.card_env.clicked.connect(self._emit_env_menu)
+        self.card_file.clicked.connect(self._on_file_settings_clicked)
+        self.card_coord.clicked.connect(self._on_coord_settings_clicked)
+        self.card_env.clicked.connect(self._on_env_settings_clicked)
+        self.card_exam.clicked.connect(self._on_exam_clicked)
+        self.card_church.clicked.connect(self._on_church_clicked)
+        self.card_rebuild.clicked.connect(self._on_rebuild_clicked)
 
         grid.addWidget(self.card_file, 0, 0)
         grid.addWidget(self.card_coord, 0, 1)
         grid.addWidget(self.card_env, 0, 2)
-        grid.addWidget(self.card_rebuild, 1, 0)
+        grid.addWidget(self.card_exam, 1, 0)
         grid.addWidget(self.card_church, 1, 1)
-        grid.addWidget(self.card_exam, 1, 2)
+        grid.addWidget(self.card_rebuild, 1, 2)
 
         root.addWidget(title)
         root.addLayout(grid)
@@ -230,6 +243,8 @@ class HomeInterface(QWidget):
             "border: 1px solid rgba(0, 0, 0, 0.08); border-radius: 16px; }"
             "#homeCard:hover { border-color: rgba(0, 120, 215, 0.7); "
             "background: rgba(235, 245, 255, 0.95); }"
+            "#homeCard[selected=\"true\"] { border: 2px solid rgba(0, 120, 215, 0.9); "
+            "background: rgba(228, 240, 255, 0.98); }"
             "#homeCardTitle { font-size: 18px; font-weight: 600; }"
             "#homeCardSubtitle { color: #666; }"
         )
@@ -237,6 +252,31 @@ class HomeInterface(QWidget):
     def _emit_env_menu(self):
         pos = self.card_env.mapToGlobal(self.card_env.rect().bottomLeft())
         self.open_env_settings.emit(pos)
+
+    def _set_selected_card(self, selected_card: HomeCard):
+        for card in (self.card_exam, self.card_church, self.card_rebuild):
+            card.setSelected(card is selected_card)
+
+    def _on_file_settings_clicked(self):
+        self.open_file_settings.emit()
+
+    def _on_coord_settings_clicked(self):
+        self.open_coord_settings.emit()
+
+    def _on_env_settings_clicked(self):
+        self._emit_env_menu()
+
+    def _on_exam_clicked(self):
+        self._set_selected_card(self.card_exam)
+        self.open_exam_results.emit()
+
+    def _on_church_clicked(self):
+        self._set_selected_card(self.card_church)
+        self.open_church_results.emit()
+
+    def _on_rebuild_clicked(self):
+        self._set_selected_card(self.card_rebuild)
+        self.open_rebuild_results.emit()
 
 
 class ScanInterface(QWidget):
@@ -381,6 +421,7 @@ class SettingsInterface(QWidget):
     auto_retry_changed = Signal(bool)
     error_popup_changed = Signal(bool)
     debug_save_changed = Signal(bool)
+    warp_enabled_changed = Signal(bool)
     log_level_changed = Signal(str)
     locale_changed = Signal(str)
 
@@ -432,8 +473,11 @@ class SettingsInterface(QWidget):
         self.chk_auto_retry.toggled.connect(self._on_auto_retry_changed)
         self.chk_error_popup = QCheckBox("오류 팝업 표시")
         self.chk_error_popup.toggled.connect(self._on_error_popup_changed)
+        self.chk_warp = QCheckBox("이미지 워프(정렬) 사용")
+        self.chk_warp.toggled.connect(self._on_warp_enabled_changed)
         scan_layout.addWidget(self.chk_auto_retry)
         scan_layout.addWidget(self.chk_error_popup)
+        scan_layout.addWidget(self.chk_warp)
 
         # 디버그/로그
         debug_group = HoverGroupBox("디버그/로그")
@@ -484,6 +528,7 @@ class SettingsInterface(QWidget):
 
         self.chk_auto_retry.setChecked(self._settings.value("scan/auto_retry", False, type=bool))
         self.chk_error_popup.setChecked(self._settings.value("scan/error_popups", True, type=bool))
+        self.chk_warp.setChecked(self._settings.value("scan/warp_enabled", True, type=bool))
         self.chk_debug_save.setChecked(self._settings.value("debug/save_on_error", False, type=bool))
 
         log_level = self._settings.value("log/level", "INFO", type=str)
@@ -525,6 +570,10 @@ class SettingsInterface(QWidget):
         self._settings.setValue("scan/error_popups", checked)
         self.error_popup_changed.emit(checked)
 
+    def _on_warp_enabled_changed(self, checked: bool):
+        self._settings.setValue("scan/warp_enabled", checked)
+        self.warp_enabled_changed.emit(checked)
+
     def _on_debug_save_changed(self, checked: bool):
         self._settings.setValue("debug/save_on_error", checked)
         self.debug_save_changed.emit(checked)
@@ -546,6 +595,8 @@ class OMRScannerApp(FluentWindow):
 
         self._settings = QSettings("OMR", "OMRProject")
         self.current_db_path = None
+        self._nav_routes = []
+        self._nav_lock_routes = None
 
         self.home_interface = HomeInterface(self)
         self.scan_interface = ScanInterface(self)
@@ -565,6 +616,7 @@ class OMRScannerApp(FluentWindow):
             _icon("HOME"),
             "홈",
             selected=True,
+            on_click=self._on_home_nav_clicked,
         )
         self.addSubInterface(
             self.scan_interface,
@@ -593,16 +645,19 @@ class OMRScannerApp(FluentWindow):
             position=NavigationItemPosition.BOTTOM,
         )
 
-    def addSubInterface(self, interface, icon, text, position=NavigationItemPosition.TOP, selected=False):
+    def addSubInterface(self, interface, icon, text, position=NavigationItemPosition.TOP, selected=False, on_click=None):
         interface.setObjectName(text)
         self.stackedWidget.addWidget(interface)
+        route_key = interface.objectName()
+        click_handler = on_click if on_click is not None else (lambda: self.switchTo(interface))
         self.navigationInterface.addItem(
-            routeKey=interface.objectName(),
+            routeKey=route_key,
             icon=icon,
             text=text,
-            onClick=lambda: self.switchTo(interface),
+            onClick=click_handler,
             position=position,
         )
+        self._nav_routes.append(route_key)
         if selected:
             self.stackedWidget.setCurrentWidget(interface)
 
@@ -610,9 +665,13 @@ class OMRScannerApp(FluentWindow):
         self.home_interface.open_file_settings.connect(self.open_file_setting)
         self.home_interface.open_coord_settings.connect(self.open_coord_calibrator)
         self.home_interface.open_env_settings.connect(self.open_env_menu)
+        self.home_interface.open_exam_results.connect(self._on_home_select_exam)
+        self.home_interface.open_church_results.connect(self._on_home_select_church)
+        self.home_interface.open_rebuild_results.connect(self._on_home_select_rebuild)
         self.settings_interface.auto_retry_changed.connect(self._apply_auto_retry)
         self.settings_interface.error_popup_changed.connect(self._apply_error_popups)
         self.settings_interface.debug_save_changed.connect(self._apply_debug_save)
+        self.settings_interface.warp_enabled_changed.connect(self._apply_warp_enabled)
         self.settings_interface.log_level_changed.connect(self._apply_log_level)
 
     def open_file_setting(self):
@@ -662,16 +721,61 @@ class OMRScannerApp(FluentWindow):
 
     def open_env_menu(self, global_pos: QPoint):
         menu = QMenu(self)
-        menu.addAction("양식/좌표 설정", self.open_form_setting)
-        menu.addAction("기표 인식 설정", self.open_mark_setting)
-        menu.addAction("저장 경로 설정", self.open_path_setting)
-        menu.addAction("고사장/시험실 설정", self.open_site_setting)
+        menu.setStyleSheet(
+            "QMenu { background: #FFFFFF; border: 1px solid rgba(0, 0, 0, 0.08);"
+            " border-radius: 12px; padding: 6px; }"
+            "QMenu::item { padding: 8px 18px; margin: 2px 6px; border-radius: 8px; }"
+            "QMenu::item:selected { background: rgba(0, 120, 215, 0.12); }"
+            "QMenu::item:disabled { color: #999; }"
+            "QMenu::separator { height: 1px; background: rgba(0, 0, 0, 0.06); margin: 6px 10px; }"
+        )
+
+        menu.addAction(_icon("DOCUMENT").icon(), "양식/좌표 설정", self.open_form_setting)
+        menu.addAction(_icon("EDIT").icon(), "기표 인식 설정", self.open_mark_setting)
+        menu.addSeparator()
+        menu.addAction(_icon("FOLDER").icon(), "저장 경로 설정", self.open_path_setting)
+        menu.addAction(_icon("PEOPLE").icon(), "고사장/시험실 설정", self.open_site_setting)
         menu.exec_(global_pos)
+
+    def _set_nav_item_enabled(self, route_key: str, enabled: bool):
+        try:
+            item = self.navigationInterface.widget(route_key)
+        except Exception:
+            return
+        item.setEnabled(enabled)
+
+    def _lock_navigation(self, allowed_routes):
+        allowed = set(allowed_routes)
+        allowed.add("설정")
+        self._nav_lock_routes = allowed
+        for route_key in self._nav_routes:
+            self._set_nav_item_enabled(route_key, route_key in allowed)
+
+    def _unlock_navigation(self):
+        self._nav_lock_routes = None
+        for route_key in self._nav_routes:
+            self._set_nav_item_enabled(route_key, True)
+
+    def _on_home_nav_clicked(self):
+        self.switchTo(self.home_interface)
+
+    def _on_home_select_exam(self):
+        self._lock_navigation({"홈", "스캔 판독", "시험 관리"})
+        self.scan_interface.scanner_view.pipeline.set_candidate_enabled(True)
+
+    def _on_home_select_church(self):
+        self._lock_navigation({"홈", "스캔 판독", "교회 선거"})
+        self.scan_interface.scanner_view.pipeline.set_candidate_enabled(False)
+
+    def _on_home_select_rebuild(self):
+        self._lock_navigation({"홈", "스캔 판독", "재개발 총회"})
+        self.scan_interface.scanner_view.pipeline.set_candidate_enabled(False)
 
     def _apply_saved_settings(self):
         self._apply_auto_retry(self._settings.value("scan/auto_retry", False, type=bool))
         self._apply_error_popups(self._settings.value("scan/error_popups", True, type=bool))
         self._apply_debug_save(self._settings.value("debug/save_on_error", False, type=bool))
+        self._apply_warp_enabled(self._settings.value("scan/warp_enabled", True, type=bool))
         self._apply_log_level(self._settings.value("log/level", "INFO", type=str))
 
     def _apply_auto_retry(self, enabled: bool):
@@ -688,6 +792,11 @@ class OMRScannerApp(FluentWindow):
         view = self.scan_interface.scanner_view
         if hasattr(view, "pipeline"):
             view.pipeline.set_debug_options(save_on_error=enabled)
+
+    def _apply_warp_enabled(self, enabled: bool):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.warp_enabled = bool(enabled)
 
     def _apply_log_level(self, level: str):
         import logging

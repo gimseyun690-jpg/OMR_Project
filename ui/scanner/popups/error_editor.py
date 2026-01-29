@@ -1,8 +1,9 @@
+# -*- coding: utf-8 -*-
 import cv2
-from PySide2.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QTableWidget, QTableWidgetItem, QPushButton, 
-                             QHeaderView, QSplitter, QCheckBox, QWidget, 
-                             QAbstractItemView, QGroupBox, QGridLayout, QFrame, QMessageBox)
+from PySide2.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
+                             QTableWidget, QTableWidgetItem, QPushButton,
+                             QHeaderView, QSplitter, QCheckBox, QWidget,
+                             QAbstractItemView, QGroupBox, QGridLayout, QFrame, QMessageBox, QScrollArea)
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QPixmap, QImage, QColor, QFont
 
@@ -18,148 +19,313 @@ class ErrorCorrectionDialog(QDialog):
         # 윈도우 설정
         self.setWindowFlags(self.windowFlags() | Qt.WindowMaximizeButtonHint | Qt.WindowMinimizeButtonHint | Qt.WindowCloseButtonHint)
         self.resize(1600, 900)
+        self.setFont(QFont("Malgun Gothic", 10))
         
         self.image_cv = image_cv
         self.scan_results = scan_results # 리스트 딕셔너리 [{'q_num':1, 'marked':[0], 'status':'정상'}...]
         self.image_path = image_path
         self.exit_code = 0
+        self._split_threshold = 20
+        self._left_map = []
+        self._mid_map = []
+        self._right_map = []
+        self.zoom_factor = 1.0
+        self._orig_pixmap = None
 
         self.init_ui()
         self.connect_signals() # ★ 버튼 기능 연결
-        self.showMaximized()
+        self.setSizeGripEnabled(True)
         
         self.load_data()
 
     def init_ui(self):
         main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(5, 5, 5, 5)
-        main_layout.setSpacing(5)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(10)
 
         # [1] 상단 패널
         top_panel = QFrame()
-        top_panel.setFixedHeight(100)
-        top_panel.setStyleSheet("background-color: #F0F0F0; border-bottom: 1px solid #999;")
+        top_panel.setObjectName("topPanel")
+        top_panel.setFixedHeight(110)
         top_layout = QHBoxLayout(top_panel)
-        top_layout.setContentsMargins(5, 5, 5, 5)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(10)
 
-        # (1-1) 점검 진행
-        grp_idx = QGroupBox("점검 진행")
-        grp_idx.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #aaa; background: white; }")
-        grid_idx = QVBoxLayout(grp_idx)
-        self.lbl_idx = QLabel("1") # 나중에 실제 순번으로 교체 가능
+        # (1-1) 점검 진행 카드
+        card_idx = QFrame()
+        card_idx.setObjectName("card")
+        card_idx.setMinimumWidth(160)
+        v_idx = QVBoxLayout(card_idx)
+        v_idx.setContentsMargins(12, 10, 12, 10)
+        v_idx.setSpacing(6)
+        lbl_idx_title = QLabel("점검 진행")
+        lbl_idx_title.setObjectName("cardTitle")
+        self.lbl_idx = QLabel("1/1")
+        self.lbl_idx.setObjectName("progressValue")
         self.lbl_idx.setAlignment(Qt.AlignCenter)
-        self.lbl_idx.setStyleSheet("color: red; font-size: 24px; font-weight: bold;")
-        grid_idx.addWidget(self.lbl_idx)
-        top_layout.addWidget(grp_idx)
+        lbl_idx_hint = QLabel("현재/전체")
+        lbl_idx_hint.setObjectName("progressHint")
+        lbl_idx_hint.setAlignment(Qt.AlignCenter)
+        v_idx.addWidget(lbl_idx_title, 0, Qt.AlignLeft)
+        v_idx.addWidget(self.lbl_idx)
+        v_idx.addWidget(lbl_idx_hint)
+        top_layout.addWidget(card_idx)
 
-        # (1-2) 이동/검색
-        grp_nav = QGroupBox("이동/검색")
-        grp_nav.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #aaa; background: white; }")
-        grid_nav = QGridLayout(grp_nav)
-        
-        self.btn_prev = QPushButton("◀ 이전자료")
-        self.btn_next = QPushButton("다음자료 ▶")
-        self.btn_prev.setStyleSheet("padding: 5px;")
-        self.btn_next.setStyleSheet("padding: 5px;")
-        
-        grid_nav.addWidget(self.btn_prev, 0, 0)
-        grid_nav.addWidget(self.btn_next, 0, 1)
-        top_layout.addWidget(grp_nav)
+        # (1-2) 이동/검색 카드
+        card_nav = QFrame()
+        card_nav.setObjectName("card")
+        card_nav.setMinimumWidth(260)
+        v_nav = QVBoxLayout(card_nav)
+        v_nav.setContentsMargins(12, 10, 12, 10)
+        v_nav.setSpacing(8)
+        lbl_nav_title = QLabel("이동/검색")
+        lbl_nav_title.setObjectName("cardTitle")
+        v_nav.addWidget(lbl_nav_title, 0, Qt.AlignLeft)
+        nav_row = QHBoxLayout()
+        nav_row.setSpacing(8)
+        self.btn_prev = QPushButton("이전 자료")
+        self.btn_next = QPushButton("다음 자료")
+        nav_row.addWidget(self.btn_prev)
+        nav_row.addWidget(self.btn_next)
+        v_nav.addLayout(nav_row)
+        top_layout.addWidget(card_nav)
 
-        # (1-3) 일괄 처리
-        grp_batch = QGroupBox("일괄 처리")
-        grp_batch.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #aaa; background: white; }")
-        grid_batch = QGridLayout(grp_batch)
-        
-        self.btn_all_agree = QPushButton("✔ 전체찬성처리(1)")
-        self.btn_all_agree.setStyleSheet("background-color: #E3F2FD; color: blue; font-weight: bold;")
-        self.btn_all_disagree = QPushButton("✔ 전체반대처리(2)")
-        self.btn_all_disagree.setStyleSheet("background-color: #E3F2FD; color: blue; font-weight: bold;")
-        
-        grid_batch.addWidget(self.btn_all_agree, 0, 0)
-        grid_batch.addWidget(self.btn_all_disagree, 0, 1)
-        top_layout.addWidget(grp_batch)
+        # (1-3) 일괄 처리 카드
+        card_batch = QFrame()
+        card_batch.setObjectName("card")
+        card_batch.setMinimumWidth(320)
+        v_batch = QVBoxLayout(card_batch)
+        v_batch.setContentsMargins(12, 10, 12, 10)
+        v_batch.setSpacing(8)
+        lbl_batch_title = QLabel("일괄 처리")
+        lbl_batch_title.setObjectName("cardTitle")
+        v_batch.addWidget(lbl_batch_title, 0, Qt.AlignLeft)
+        batch_row = QHBoxLayout()
+        batch_row.setSpacing(8)
+        self.btn_all_agree = QPushButton("전체 찬성 처리 (1)")
+        self.btn_all_disagree = QPushButton("전체 반대 처리 (2)")
+        batch_row.addWidget(self.btn_all_agree)
+        batch_row.addWidget(self.btn_all_disagree)
+        v_batch.addLayout(batch_row)
+        top_layout.addWidget(card_batch)
 
-        # (1-4) 저장 버튼
-        grp_save = QGroupBox("완료")
-        grp_save.setStyleSheet("QGroupBox { font-weight: bold; border: 1px solid #aaa; background: #E8F5E9; }")
-        v_save = QVBoxLayout(grp_save)
-        
-        self.btn_save = QPushButton("확인/저장/다음점검(S)")
+        # (1-4) 저장 카드
+        card_save = QFrame()
+        card_save.setObjectName("cardPrimary")
+        card_save.setMinimumWidth(240)
+        v_save = QVBoxLayout(card_save)
+        v_save.setContentsMargins(12, 10, 12, 10)
+        v_save.setSpacing(6)
+        lbl_save_title = QLabel("완료")
+        lbl_save_title.setObjectName("cardTitle")
+        self.btn_save = QPushButton("확인/저장 후 다음 (S)")
+        self.btn_save.setObjectName("primaryButton")
         self.btn_save.setFixedHeight(40)
-        self.btn_save.setStyleSheet("""
-            QPushButton { 
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #4CAF50, stop:1 #388E3C);
-                color: white; font-weight: bold; font-size: 14px; border-radius: 5px;
-            }
-            QPushButton:hover { background: #66BB6A; }
-        """)
+        v_save.addWidget(lbl_save_title, 0, Qt.AlignLeft)
         v_save.addWidget(self.btn_save)
-        top_layout.addWidget(grp_save)
+        top_layout.addWidget(card_save)
 
         main_layout.addWidget(top_panel)
 
-        # [2] 중앙 작업 영역
+        # [2] 중단 작업 영역
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(5)
         splitter.setStyleSheet("QSplitter::handle { background-color: #ccc; }")
+        self.main_splitter = splitter
 
-        # 왼쪽: 이미지
+        # 좌측: 이미지
         frame_left = QFrame()
-        frame_left.setStyleSheet("background-color: #555;")
+        frame_left.setObjectName("imagePanel")
         layout_left = QVBoxLayout(frame_left)
-        layout_left.setContentsMargins(0,0,0,0)
-        
-        self.lbl_info = QLabel(f"  📄 파일명: {self.image_path}")
+        layout_left.setContentsMargins(0, 0, 0, 0)
+
+        self.lbl_info = QLabel(f"  현재 파일명 {self.image_path}")
         self.lbl_info.setFixedHeight(30)
-        self.lbl_info.setStyleSheet("background-color: #333; color: white; font-weight: bold; padding: 5px;")
+        self.lbl_info.setObjectName("imageInfo")
         layout_left.addWidget(self.lbl_info)
 
-        self.lbl_image = QLabel()
-        self.lbl_image.setAlignment(Qt.AlignCenter)
-        layout_left.addWidget(self.lbl_image)
+        self.lbl_image = _ImageLabel(self)
+        self.lbl_image.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        self.image_scroll = QScrollArea()
+        self.image_scroll.setWidget(self.lbl_image)
+        self.image_scroll.setWidgetResizable(True)
+        self.image_scroll.setFrameShape(QFrame.NoFrame)
+        self.image_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.image_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        layout_left.addWidget(self.image_scroll)
         splitter.addWidget(frame_left)
 
-        # 오른쪽: 데이터
+        # 우측: 데이터 (상/하 분할)
         frame_right = QWidget()
         layout_right = QVBoxLayout(frame_right)
         layout_right.setContentsMargins(0, 0, 0, 0)
+        layout_right.setSpacing(6)
+        right_splitter = QSplitter(Qt.Vertical)
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["안건", "찬성(1)", "반대(2)"])
-        self.table.verticalHeader().setVisible(False)
-        self.table.setStyleSheet("""
-            QHeaderView::section {
-                background-color: #E0E0E0; padding: 6px; border: 1px solid #BDBDBD;
-                font-weight: bold; font-size: 13px; color: black;
-            }
-            QTableWidget { 
-                gridline-color: #BDBDBD; font-size: 14px; selection-background-color: #D1E8FF; selection-color: black;
-            }
-        """)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        layout_right.addWidget(self.table)
+        self._tables_splitter = QSplitter(Qt.Horizontal)
+        self.table_left = self._create_table()
+        self.table_mid = self._create_table()
+        self.table_right = self._create_table()
+        self.table_mid.setVisible(False)
+        self.table_right.setVisible(False)
+        self._tables_splitter.addWidget(self.table_left)
+        self._tables_splitter.addWidget(self.table_mid)
+        self._tables_splitter.addWidget(self.table_right)
+        self._tables_splitter.setSizes([1, 1, 1])
+        right_splitter.addWidget(self._tables_splitter)
 
         self.lbl_log = QLabel()
-        self.lbl_log.setFixedHeight(100)
         self.lbl_log.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.lbl_log.setStyleSheet("""
-            background-color: white; border-top: 2px solid #aaa; 
-            padding: 10px; color: #D32F2F; font-weight: bold; font-size: 13px;
-        """)
-        self.lbl_log.setText("오류 내용 대기중...")
-        layout_right.addWidget(self.lbl_log)
+        self.lbl_log.setObjectName("logPanel")
+        self.lbl_log.setText("오류 내용 확인 중...")
+        right_splitter.addWidget(self.lbl_log)
+        right_splitter.setSizes([600, 200])
+        layout_right.addWidget(right_splitter)
 
         splitter.addWidget(frame_right)
-        splitter.setSizes([1000, 600])
+        splitter.setSizes([700, 500])
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
         self.setLayout(main_layout)
+
+        self.setStyleSheet("""
+            QDialog { background: #F7F9FC; }
+            #topPanel { background: transparent; }
+            #card {
+                background: #FFFFFF;
+                border: 1px solid rgba(0, 0, 0, 0.08);
+                border-radius: 12px;
+            }
+            #cardPrimary {
+                background: #F0F6FF;
+                border: 1px solid rgba(37, 99, 235, 0.35);
+                border-radius: 12px;
+            }
+            #cardTitle { color: #5B6775; font-weight: 600; font-size: 12px; }
+            #progressValue { color: #2563EB; font-size: 26px; font-weight: 700; }
+            #progressHint { color: #8B95A1; font-size: 11px; }
+            QPushButton {
+                background: #FFFFFF;
+                border: 1px solid rgba(0, 0, 0, 0.12);
+                border-radius: 8px;
+                padding: 8px 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover { background: #F2F6FF; border-color: rgba(37, 99, 235, 0.4); }
+            QPushButton#primaryButton {
+                background: #2563EB;
+                color: #FFFFFF;
+                border: 1px solid #1D4ED8;
+            }
+            QPushButton#primaryButton:hover { background: #1D4ED8; }
+            #imagePanel { background: #1F2937; border-radius: 12px; }
+            #imageInfo { background: #111827; color: #E5E7EB; font-weight: 600; padding: 6px 10px; }
+            #logPanel {
+                background: #FFFFFF;
+                border: 1px solid rgba(0, 0, 0, 0.08);
+                border-radius: 12px;
+                padding: 10px;
+                color: #B91C1C;
+                font-weight: 600;
+                font-size: 13px;
+            }
+        """)
+
+    def _create_table(self):
+        table = QTableWidget()
+        table.setColumnCount(3)
+        table.setHorizontalHeaderLabels(["문항", "찬성(1)", "반대(2)"])
+        table.verticalHeader().setVisible(False)
+        table.setStyleSheet("""
+            QHeaderView::section {
+                background-color: #F1F5F9; padding: 6px; border: 1px solid #E2E8F0;
+                font-weight: bold; font-size: 13px; color: #0F172A;
+            }
+            QTableWidget {
+                gridline-color: #E5E7EB; font-size: 13px; selection-background-color: #D1E8FF; selection-color: black;
+                background: #FFFFFF; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px;
+            }
+        """)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        return table
+
+    def _fill_table(self, table, indices):
+        table.setRowCount(len(indices))
+        for row, idx in enumerate(indices):
+            data = self.scan_results[idx]
+
+            item_no = QTableWidgetItem(str(data['q_num']))
+            item_no.setTextAlignment(Qt.AlignCenter)
+            item_no.setFlags(item_no.flags() & ~Qt.ItemIsEditable)
+            table.setItem(row, 0, item_no)
+
+            chk_agree = QCheckBox()
+            chk_disagree = QCheckBox()
+            chk_agree.setStyleSheet("QCheckBox::indicator { width: 20px; height: 20px; }")
+            chk_disagree.setStyleSheet("QCheckBox::indicator { width: 20px; height: 20px; }")
+
+            if 0 in data['marked']:
+                chk_agree.setChecked(True)
+            if 1 in data['marked']:
+                chk_disagree.setChecked(True)
+
+            chk_agree.clicked.connect(lambda checked, r=idx: self.on_checkbox_click(r, 0, checked))
+            chk_disagree.clicked.connect(lambda checked, r=idx: self.on_checkbox_click(r, 1, checked))
+
+            w1 = QWidget()
+            l1 = QHBoxLayout(w1)
+            l1.addWidget(chk_agree)
+            l1.setAlignment(Qt.AlignCenter)
+            l1.setContentsMargins(0, 0, 0, 0)
+            w2 = QWidget()
+            l2 = QHBoxLayout(w2)
+            l2.addWidget(chk_disagree)
+            l2.setAlignment(Qt.AlignCenter)
+            l2.setContentsMargins(0, 0, 0, 0)
+            table.setCellWidget(row, 1, w1)
+            table.setCellWidget(row, 2, w2)
+
+            status = data['status']
+            if status != "정상":
+                bg_color = QColor(255, 255, 255)
+                txt_color = QColor(0, 0, 0)
+                if status == "중복":
+                    bg_color = QColor(0, 0, 255)
+                    txt_color = QColor(255, 255, 255)
+                elif status == "공란":
+                    bg_color = QColor(255, 200, 200)
+                    txt_color = QColor(255, 0, 0)
+                item_no.setBackground(bg_color)
+                item_no.setForeground(txt_color)
+    def _get_active_table(self):
+        if self.table_right.isVisible() and self.table_right.hasFocus():
+            return self.table_right, self._right_map
+        if self.table_mid.isVisible() and self.table_mid.hasFocus():
+            return self.table_mid, self._mid_map
+        return self.table_left, self._left_map
+
+    def _select_global_index(self, idx):
+        if idx is None:
+            return
+        if idx in self._left_map:
+            row = self._left_map.index(idx)
+            self.table_left.selectRow(row)
+            self.table_left.setFocus()
+        elif idx in self._mid_map:
+            row = self._mid_map.index(idx)
+            self.table_mid.selectRow(row)
+            self.table_mid.setFocus()
+        elif idx in self._right_map:
+            row = self._right_map.index(idx)
+            self.table_right.selectRow(row)
+            self.table_right.setFocus()
+
 
     def connect_signals(self):
         """버튼 기능 연결"""
@@ -178,56 +344,98 @@ class ErrorCorrectionDialog(QDialog):
         if not self.scan_results:
             return
 
-        self.table.setRowCount(len(self.scan_results))
         error_logs = []
-
-        for row, data in enumerate(self.scan_results):
-            # (1) 번호
-            item_no = QTableWidgetItem(str(data['q_num']))
-            item_no.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 0, item_no)
-
-            # (2) 체크박스
-            chk_agree = QCheckBox()
-            chk_disagree = QCheckBox()
-            chk_agree.setStyleSheet("QCheckBox::indicator { width: 20px; height: 20px; }")
-            chk_disagree.setStyleSheet("QCheckBox::indicator { width: 20px; height: 20px; }")
-
-            # 체크 상태 설정
-            if 0 in data['marked']: chk_agree.setChecked(True)
-            if 1 in data['marked']: chk_disagree.setChecked(True)
-
-            # ★ 중요: 사용자가 체크를 바꾸면 데이터도 바뀌게 연결
-            # lambda를 써서 현재 row와 어떤 체크박스인지(0 or 1) 넘겨줌
-            chk_agree.clicked.connect(lambda checked, r=row: self.on_checkbox_click(r, 0, checked))
-            chk_disagree.clicked.connect(lambda checked, r=row: self.on_checkbox_click(r, 1, checked))
-
-            # 레이아웃에 넣기
-            w1 = QWidget(); l1 = QHBoxLayout(w1); l1.addWidget(chk_agree); l1.setAlignment(Qt.AlignCenter); l1.setContentsMargins(0,0,0,0)
-            w2 = QWidget(); l2 = QHBoxLayout(w2); l2.addWidget(chk_disagree); l2.setAlignment(Qt.AlignCenter); l2.setContentsMargins(0,0,0,0)
-            self.table.setCellWidget(row, 1, w1)
-            self.table.setCellWidget(row, 2, w2)
-
-            # (3) 오류 강조
-            status = data['status']
-            if status != "정상":
+        for data in self.scan_results:
+            status = data.get('status')
+            if status and status != "정상":
                 error_logs.append(f"[{data['q_num']}번 안건] {status} 오류")
-                
-                bg_color = QColor(255, 255, 255)
-                txt_color = QColor(0, 0, 0)
-                if status == "중복":
-                    bg_color = QColor(0, 0, 255); txt_color = QColor(255, 255, 255)
-                elif status == "공란":
-                    bg_color = QColor(255, 200, 200); txt_color = QColor(255, 0, 0)
-                
-                item_no.setBackground(bg_color)
-                item_no.setForeground(txt_color)
+
+        total = len(self.scan_results)
+        if total > 40:
+            first = (total + 2) // 3
+            second = (total - first + 1) // 2
+            split_a = first
+            split_b = first + second
+        elif total > self._split_threshold:
+            split_a = (total + 1) // 2
+            split_b = total
+        else:
+            split_a = total
+            split_b = total
+
+        self._left_map = list(range(0, split_a))
+        self._mid_map = list(range(split_a, split_b))
+        self._right_map = list(range(split_b, total))
+
+        self.table_left.setRowCount(0)
+        self.table_mid.setRowCount(0)
+        self.table_right.setRowCount(0)
+        self._fill_table(self.table_left, self._left_map)
+
+        if self._right_map:
+            self.table_mid.setVisible(True)
+            self.table_right.setVisible(True)
+            self._fill_table(self.table_mid, self._mid_map)
+            self._fill_table(self.table_right, self._right_map)
+            self._tables_splitter.setSizes([1, 1, 1])
+        elif self._mid_map:
+            self.table_mid.setVisible(True)
+            self.table_right.setVisible(False)
+            self._fill_table(self.table_mid, self._mid_map)
+            self._tables_splitter.setSizes([1, 1, 0])
+        else:
+            self.table_mid.setVisible(False)
+            self.table_right.setVisible(False)
+            self._tables_splitter.setSizes([1, 0, 0])
+
+        if self._left_map:
+            self.table_left.selectRow(0)
 
         if error_logs:
-            self.lbl_log.setText("🚨 오류 내역:\n" + "\n".join(error_logs))
+            self.lbl_log.setText("오류 내용:\n" + "\n".join(error_logs))
         else:
-            self.lbl_log.setText("✅ 모든 항목이 정상입니다.")
-            self.lbl_log.setStyleSheet("background-color: #E8F5E9; border-top: 2px solid #4CAF50; padding: 10px; color: #2E7D32; font-weight: bold; font-size: 13px;")
+            self.lbl_log.setText("모든 문항이 정상입니다.")
+            self.lbl_log.setStyleSheet(
+                "background-color: #E8F5E9; border-top: 2px solid #4CAF50; "
+                "padding: 10px; color: #2E7D32; font-weight: bold; font-size: 13px;"
+            )
+
+
+
+
+
+    def wheelEvent(self, event):
+        if self.image_scroll.underMouse():
+            delta = event.angleDelta().y()
+            step = 10 if delta > 0 else -10
+            self._apply_wheel_zoom(step)
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def _apply_wheel_zoom(self, step):
+        factor = 1.1 if step > 0 else 0.9
+        self.zoom_factor = max(0.5, min(3.0, self.zoom_factor * factor))
+        self._render_image()
+
+    def _start_pan(self, event):
+        self._panning = True
+        self._pan_start = event.pos()
+        self._pan_h_start = self.image_scroll.horizontalScrollBar().value()
+        self._pan_v_start = self.image_scroll.verticalScrollBar().value()
+        self.lbl_image.setCursor(Qt.ClosedHandCursor)
+
+    def _move_pan(self, event):
+        if not getattr(self, "_panning", False):
+            return
+        delta = event.pos() - self._pan_start
+        self.image_scroll.horizontalScrollBar().setValue(self._pan_h_start - delta.x())
+        self.image_scroll.verticalScrollBar().setValue(self._pan_v_start - delta.y())
+
+    def _end_pan(self):
+        self._panning = False
+        self.lbl_image.setCursor(Qt.OpenHandCursor)
+
 
     def on_checkbox_click(self, row, col_type, checked):
         """체크박스를 누르면 실제 데이터(self.scan_results)를 업데이트"""
@@ -269,31 +477,37 @@ class ErrorCorrectionDialog(QDialog):
     def keyPressEvent(self, event):
         """키보드 단축키 처리"""
         key = event.key()
-        
-        # 현재 선택된 행 가져오기
-        current_row = self.table.currentRow()
+
+        table, mapping = self._get_active_table()
+        if not mapping:
+            return
+
+        current_row = table.currentRow()
         if current_row < 0:
-            current_row = 0 # 선택 안됐으면 0번부터
-            self.table.selectRow(0)
+            current_row = 0
+            table.selectRow(0)
 
-        # 1번 키: 찬성 체크
-        if key == Qt.Key_1:
-            self.scan_results[current_row]['marked'] = [0]
-            self.scan_results[current_row]['status'] = "정상"
+        try:
+            global_idx = mapping[current_row]
+        except Exception:
+            global_idx = None
+
+        next_idx = None
+
+        if key == Qt.Key_1 and global_idx is not None:
+            self.scan_results[global_idx]['marked'] = [0]
+            self.scan_results[global_idx]['status'] = "정상"
+            next_idx = global_idx + 1
             self.load_data()
-            # 다음 줄로 자동 이동 (편의 기능)
-            if current_row < self.table.rowCount() - 1:
-                self.table.selectRow(current_row + 1)
+            self._select_global_index(next_idx)
 
-        # 2번 키: 반대 체크
-        elif key == Qt.Key_2:
-            self.scan_results[current_row]['marked'] = [1]
-            self.scan_results[current_row]['status'] = "정상"
+        elif key == Qt.Key_2 and global_idx is not None:
+            self.scan_results[global_idx]['marked'] = [1]
+            self.scan_results[global_idx]['status'] = "정상"
+            next_idx = global_idx + 1
             self.load_data()
-            if current_row < self.table.rowCount() - 1:
-                self.table.selectRow(current_row + 1)
+            self._select_global_index(next_idx)
 
-        # S 키: 저장 (Ctrl+S 아님, 그냥 S)
         elif key == Qt.Key_S:
             self.save_and_close()
 
@@ -327,11 +541,68 @@ class ErrorCorrectionDialog(QDialog):
                 bytes_per_line = ch * w
                 rgb_img = cv2.cvtColor(self.image_cv, cv2.COLOR_BGR2RGB)
                 q_img = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                pixmap = QPixmap.fromImage(q_img)
-                self.lbl_image.setPixmap(pixmap.scaled(self.lbl_image.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                self._orig_pixmap = QPixmap.fromImage(q_img)
+                self._render_image()
             except: pass
 
+    def _render_image(self):
+        if not self._orig_pixmap:
+            return
+        viewport = self.image_scroll.viewport()
+        target_h = viewport.height()
+        if target_h <= 0:
+            return
+        scaled_h = max(1, int(target_h * self.zoom_factor))
+        scaled = self._orig_pixmap.scaledToHeight(scaled_h, Qt.SmoothTransformation)
+        self.lbl_image.setPixmap(scaled)
+        self._adjust_left_panel_width(scaled)
+
+    def _adjust_left_panel_width(self, pixmap: QPixmap):
+        if not hasattr(self, "main_splitter") or pixmap.isNull():
+            return
+        total_w = self.main_splitter.width()
+        if total_w <= 0:
+            return
+        right_min = 420
+        viewport = self.image_scroll.viewport()
+        h = viewport.height()
+        if h <= 0:
+            return
+        aspect = pixmap.width() / max(pixmap.height(), 1)
+        desired = int(h * aspect)
+        desired = max(360, min(total_w - right_min, desired))
+        if desired > 0 and total_w - desired > 0:
+            self.main_splitter.setSizes([desired, total_w - desired])
+
     def resizeEvent(self, event):
-        self.update_image()
+        self._render_image()
         super().resizeEvent(event)
+
+
+class _ImageLabel(QLabel):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._owner = parent
+        self.setCursor(Qt.OpenHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._owner is not None:
+            self._owner._start_pan(event)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._owner is not None:
+            self._owner._move_pan(event)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._owner is not None:
+            self._owner._end_pan()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 

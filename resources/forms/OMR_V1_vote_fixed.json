@@ -1,0 +1,19 @@
+{
+  "form_id": "OMR_Vote_2025_Fixed",
+  "form_no": "OMR_V1_vote_fixed",
+  "display_name": "OMR Vote 2025 Fixed",
+  "layout_mode": "fixed",
+  "omr": {
+    "threshold": 140,
+    "pixel_ratio": 0.05
+  },
+  "roi": {
+    "start_y": 771,
+    "gap_y": 118,
+    "w": 35,
+    "h": 35,
+    "agree_x": 950,
+    "disagree_x": 1101
+  },
+  "questions": 5
+}

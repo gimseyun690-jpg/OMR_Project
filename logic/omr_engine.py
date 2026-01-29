@@ -68,6 +68,11 @@ class OMREngine:
                 if area > max_area and len(approx) == 4:
                     biggest = approx
                     max_area = area
+
+        # 윤곽이 너무 작으면(페이지 아님) 테이블 코너 감지로 대체
+        H, W = img.shape[:2]
+        if biggest.size != 0 and max_area < (W * H * 0.3):
+            biggest = np.array([])
         
         # 2. [2단계 시도] 외곽선을 못 찾았다면? -> 표 테두리 감지기(table_corner_detector) 호출
         if biggest.size == 0:
@@ -89,21 +94,22 @@ class OMREngine:
             biggest = self.reorder(biggest)
             pts1 = np.float32(biggest)
             
-            # 좌상, 우상, 우하, 좌하 순서
+            # 원본 크기 유지 (리사이즈 금지)
+            h, w = img.shape[:2]
             pts2 = np.float32([
                 [0, 0],
-                [self.width - 1, 0],
-                [self.width - 1, self.height - 1],
-                [0, self.height - 1]
+                [w - 1, 0],
+                [w - 1, h - 1],
+                [0, h - 1]
             ])
             
             matrix = cv2.getPerspectiveTransform(pts1, pts2)
-            img_warped = cv2.warpPerspective(img, matrix, (self.width, self.height))
+            img_warped = cv2.warpPerspective(img, matrix, (w, h))
             
             return img_warped, True, "warp_ok"
 
-        # 4. 정 안되면 원본 리사이즈 반환
-        return cv2.resize(img, (self.width, self.height)), False, "fallback_resize"
+        # 4. 정렬 실패 시: 리사이즈 없이 원본 반환
+        return img, False, "fallback_original"
 
     # =========================================================
     # 사이드 마크 감지

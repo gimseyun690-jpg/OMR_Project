@@ -37,6 +37,8 @@ class ScanPipeline:
         self.debug_save_on_error = False
         self.debug_dir = os.path.join(os.getcwd(), "data", "scan_debug")
         os.makedirs(self.debug_dir, exist_ok=True)
+        self.candidate_enabled = False
+        self.warp_enabled = True
 
     # ====== 외부 설정 ======
     def set_project(self, db_path: str | None):
@@ -96,6 +98,10 @@ class ScanPipeline:
             except Exception as e:
                 print(f"폼 로드 오류: {e}")
                 print(traceback.format_exc())
+
+    def set_candidate_enabled(self, enabled: bool):
+        """수험정보 판독 사용 여부"""
+        self.candidate_enabled = bool(enabled)
 
     # ====== [복구됨] 내부 유틸: DB에서 설정 가져오기 ======
     def _get_params_from_db(self):
@@ -195,15 +201,23 @@ class ScanPipeline:
             return None
 
     # ====== 메인 프로세스 ======
-    def process_image(self, image_path: str, read_num: int, place: str, room: str) -> list[str]:
+    def process_image(self, image_path: str, read_num: int, place: str, room: str, warp_enabled: bool | None = None) -> list[str]:
         # 1) 이미지 로드 (Engine이 한글 경로 처리)
         img = self.engine.load_image(image_path)
         if img is None:
             return self._create_error_result(read_num, place, room, image_path, "이미지 로드 실패")
 
         # 2) 이미지 정렬 (Auto-Deskew / 투영 변환)
-        aligned_img, align_ok, align_reason = self.engine.align_image(img, self.form_data)
-        if aligned_img is None or not align_ok:
+        use_warp = self.warp_enabled if warp_enabled is None else bool(warp_enabled)
+        if use_warp:
+            aligned_img, align_ok, align_reason = self.engine.align_image(img, self.form_data)
+        else:
+            aligned_img, align_ok, align_reason = img, True, "warp_disabled"
+        if aligned_img is None:
+            reason = f"이미지 정렬 실패({align_reason})"
+            self._save_debug_if_needed(img, image_path, "ALIGN_FAIL")
+            return self._create_error_result(read_num, place, room, image_path, reason)
+        if not align_ok and align_reason != "fallback_original":
             reason = f"이미지 정렬 실패({align_reason})"
             self._save_debug_if_needed(aligned_img or img, image_path, "ALIGN_FAIL")
             return self._create_error_result(read_num, place, room, image_path, reason)
@@ -220,7 +234,13 @@ class ScanPipeline:
         try:
             # [CASE A] JSON 폼이 선택된 경우
             if isinstance(self.form_data, dict):
-                sheet_code = self.form_data.get("sheet_code", "Unknown")
+                # 시트코드는 폼 번호(form_no) 우선, 없으면 sheet_code/form_id 순
+                sheet_code = (
+                    self.form_data.get("form_no")
+                    or self.form_data.get("sheet_code")
+                    or self.form_data.get("form_id")
+                    or "Unknown"
+                )
                 layout_mode = self.form_data.get("layout_mode", "fixed")
 
                 if layout_mode == "side_marker":
@@ -241,13 +261,17 @@ class ScanPipeline:
             status_code = "ERR"
 
         # 4) 수험정보 판독/비교 (선택)
-        cand_ok, cand_reason, cand_info = self._process_candidate_fields(aligned_img)
-        candidate_info = cand_info or {}
-        if not cand_ok:
-            status_code = "ERR"
-            if not error_reason:
-                error_reason = "CANDIDATE"
-                candidate_msg = cand_reason
+        cand_ok = True
+        cand_reason = ""
+        cand_info = {}
+        if self.candidate_enabled:
+            cand_ok, cand_reason, cand_info = self._process_candidate_fields(aligned_img)
+            candidate_info = cand_info or {}
+            if not cand_ok:
+                status_code = "ERR"
+                if not error_reason:
+                    error_reason = "CANDIDATE"
+                    candidate_msg = cand_reason
 
         # 5) 결과/저장
         result_str = self._result_to_string(results)
@@ -258,6 +282,8 @@ class ScanPipeline:
             ui_message = "타이밍 마크 오류입니다."
         elif status_code != "OK" and error_reason == "CANDIDATE":
             ui_message = candidate_msg or "수험정보 불일치"
+        elif status_code != "OK":
+            ui_message = "판독 오류"
         else:
             ui_message = "완료"
 
@@ -274,9 +300,11 @@ class ScanPipeline:
                 "sheet_code": sheet_code,
                 "mark_result": result_str,
                 "is_valid": is_valid,
+                "error_message": ui_message if is_valid == 0 else None,
                 "exam_no": candidate_info.get("exam_no"),
                 "birth": candidate_info.get("birth"),
                 "subject": candidate_info.get("subject"),
+                "review_done": 0,
             }
             self.db.insert_scan_result(self.current_db_path, save_data)
 

@@ -16,7 +16,11 @@ class DataGrid(QTableWidget):
         self.verticalHeader().setVisible(False) # 행번호 숨김
         self.setAlternatingRowColors(True)      # 줄무늬
         self.setSelectionBehavior(QAbstractItemView.SelectRows) # 행 단위 선택
-        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.setEditTriggers(
+            QAbstractItemView.DoubleClicked
+            | QAbstractItemView.SelectedClicked
+            | QAbstractItemView.EditKeyPressed
+        )
         self.setStyleSheet("""
             QTableWidget { background-color: white; gridline-color: #d0d0d0; }
             QHeaderView::section { 
@@ -42,6 +46,10 @@ class DataGrid(QTableWidget):
         self.insertRow(row)
         for i, text in enumerate(data_list):
             item = QTableWidgetItem(str(text))
+            if i in (2, 3):
+                item.setFlags(item.flags() | Qt.ItemIsEditable)
+            else:
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
             item.setTextAlignment(Qt.AlignCenter)
             self.setItem(row, i, item)
 
