@@ -57,6 +57,16 @@ class FormManager:
     def get_side_marker_params(self, scale: float = 1.0):
         if not isinstance(self.form_data, dict):
             return 40, 40, 600, 750
+
+    def get_side_marker_params_dict(self, scale: float = 1.0):
+        box_w, box_h, dist_agree, dist_disagree = self.get_side_marker_params(scale=scale)
+        return {
+            "box_w": box_w,
+            "box_h": box_h,
+            "dist_agree": dist_agree,
+            "dist_disagree": dist_disagree,
+        }
+
         roi_params = self.form_data.get("roi_params", {})
         if not isinstance(roi_params, dict):
             roi_params = {}

@@ -26,6 +26,9 @@ class DemoFlowMixin:
             QMessageBox.information(self, "알림", "선택한 폴더에 이미지가 없습니다.")
             return
 
+        # 이미지 불러오기 시작 시 다음 시험실로 이동
+        self._advance_room()
+
         # UI 잠금
         self.control_panel.btn_scan.setEnabled(False)
         self.control_panel.btn_check.setEnabled(False)
@@ -115,9 +118,6 @@ class DemoFlowMixin:
         count = str(self.current_session_count)
         self._upsert_summary_count(place, room, int(count))
         self.reload_grid_from_db(place=place, room=room)
-
-        # 이미지 불러오기 종료 후 다음 시험실로 자동 이동
-        self._advance_room()
 
         QMessageBox.information(self, "이미지 불러오기 완료", f"성공 {ok} / 실패 {fail}")
 

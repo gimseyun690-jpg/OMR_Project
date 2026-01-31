@@ -415,9 +415,9 @@ class GridSyncMixin:
             error_message = row[9] if len(row) > 9 else ""
             review_done = row[13] if len(row) > 13 else 0
             if is_valid == 1:
-                ui_status = ""
-                review_status = "완료" if review_done else ""
-                display_detail = ""
+                ui_status = "정상"
+                review_status = "완료" if review_done else "정상"
+                display_detail = result_str
             else:
                 ui_status = error_message if error_message else "오류"
                 review_status = "완료" if review_done else "미점검"
@@ -564,6 +564,15 @@ class GridSyncMixin:
         if not self.current_db_path:
             return
         self._refresh_summary_async()
+
+    def _on_room_changed(self, room_text: str):
+        """상단 판독시험실 변경 시 해당 시험실 데이터로 그리드 갱신."""
+        if not self.current_db_path:
+            return
+        place_text = self.cb_place.currentText() if hasattr(self, "cb_place") else None
+        if not place_text or not room_text:
+            return
+        self.reload_grid_from_db(place=place_text, room=room_text)
 
 
 

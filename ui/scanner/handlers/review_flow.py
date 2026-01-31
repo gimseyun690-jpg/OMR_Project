@@ -32,9 +32,7 @@ class ReviewFlowMixin:
         completed_all = self.run_review_loop(0)
         if completed_all:
             if auto_next and self.control_panel.chk_next.isChecked():
-                QMessageBox.information(self, "검토 완료", "검토가 완료되었습니다. 다음 시험실로 이동합니다.")
-                self._advance_room()
-                self.start_scan()
+                QMessageBox.information(self, "검토 완료", "검토가 완료되었습니다.")
             else:
                 QMessageBox.information(self, "검토 완료", "검토가 완료되었습니다.")
 
@@ -156,7 +154,26 @@ class ReviewFlowMixin:
         except Exception as e:
             print(f"이미지 로드 실패: {e}")
 
-        dlg = ErrorCorrectionDialog(self, image_cv, scan_results, image_path)
+        debug_img = image_cv
+        try:
+            if image_cv is not None and hasattr(self, "pipeline") and isinstance(self.pipeline.form_data, dict):
+                aligned_img, _, _ = self.pipeline.engine.align_image(image_cv)
+                if aligned_img is not None:
+                    scale = self.pipeline._get_scale_factor()
+                    layout_mode = self.pipeline.form_manager.get_layout_mode()
+                    if layout_mode == "side_marker":
+                        questions = self.pipeline.form_data.get("questions", [])
+                        roi_params = self.pipeline.form_data.get("roi_params", {}) or {}
+                        _, _, debug_img, _ = self.pipeline.engine.analyze_side_marker_sheet(
+                            aligned_img, questions, roi_params, scale=scale
+                        )
+                    else:
+                        rois = self.pipeline.form_manager.get_fixed_rois(scale=scale)
+                        _, _, debug_img = self.pipeline.engine.analyze_sheet_cv(aligned_img, rois)
+        except Exception as e:
+            print(f"[REVIEW] debug overlay 실패: {e}")
+
+        dlg = ErrorCorrectionDialog(self, debug_img, scan_results, image_path)
         dlg.lbl_idx.setText(str(read_num))
         dlg.exec_()
 

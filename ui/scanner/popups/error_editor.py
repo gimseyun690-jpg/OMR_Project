@@ -555,6 +555,13 @@ class ErrorCorrectionDialog(QDialog):
         self.accept()  # 창 닫기
 
     def update_image(self):
+        if self.image_cv is None and self.image_path:
+            try:
+                img_array = np.fromfile(self.image_path, np.uint8)
+                self.image_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            except Exception:
+                self.image_cv = None
+
         if self.image_cv is not None:
             try:
                 h, w, ch = self.image_cv.shape
@@ -565,6 +572,8 @@ class ErrorCorrectionDialog(QDialog):
                 self._render_image()
             except Exception:
                 pass
+        else:
+            self.lbl_log.setText("이미지 로드 실패: 경로를 확인해주세요.")
 
     def _render_image(self):
         if not self._orig_pixmap:

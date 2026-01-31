@@ -65,6 +65,10 @@ class ScanFlowMixin:
         self.current_summary_row = None
         self.session_start_room_text = self.cb_room.currentText()
 
+        # 새 시험실 스캔 시작 시 그리드 UI를 비워서 누적 표시를 방지
+        if hasattr(self, "main_grid"):
+            self.main_grid.setRowCount(0)
+
         # 마지막 스캔 설정 저장
         self.last_scan_params = {
             "form_index": self.cb_form.currentIndex(),
@@ -115,6 +119,13 @@ class ScanFlowMixin:
             read_num = int(row_data[0])
         except Exception:
             read_num = None
+
+        # 이전 시험실의 지연된 결과는 현재 그리드에 섞지 않음
+        if read_num is not None and hasattr(self, "session_start_read_num"):
+            if read_num < self.session_start_read_num:
+                if self.pending_analyze == 0:
+                    self._maybe_start_auto_review()
+                return
 
         if read_num is None:
             self._append_row(row_data)
@@ -202,8 +213,6 @@ class ScanFlowMixin:
             self.auto_next_pending = True
             self._maybe_start_auto_review()
         else:
-            # [수정] 시험실 번호 자동 증가
-            self._advance_room()
             QMessageBox.information(self, "완료", f"{place} - {room} 시험실 스캔 완료\n(총 {count}매)")
             self.reset_ui_state()
             self.control_panel.btn_retry.setEnabled(False)

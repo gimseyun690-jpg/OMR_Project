@@ -85,6 +85,7 @@ class UiSetupMixin:
         # [추가] 콤보박스 변경 시 상단 라벨 자동 업데이트
         self.cb_place.currentTextChanged.connect(self.lbl_cur_place.setText)
         self.cb_room.currentTextChanged.connect(self.lbl_cur_room.setText)
+        self.cb_room.currentTextChanged.connect(self._on_room_changed)
 
         self.cb_form.currentIndexChanged.connect(self.on_form_changed)
         self.on_form_changed()  # 초기 1회 적용
