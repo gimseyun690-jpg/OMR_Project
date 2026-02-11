@@ -14,7 +14,7 @@ class ReviewFlowMixin:
 
     def open_error_check(self, auto_next: bool = False):
         """오류 검사 버튼 클릭 시 실행 (필터 조건은 서비스에서 처리)."""
-        if not self.current_db_path: 
+        if not self.current_db_path:
             return
 
         # 1. DB에서 오류 큐 필터링
@@ -26,28 +26,29 @@ class ReviewFlowMixin:
 
         if not self.error_queue:
             QMessageBox.information(self, "완료", "검토할 오류가 없습니다.\n(설정 조건에 맞는 오류가 없음)")
+            if auto_next and self.control_panel.chk_next.isChecked():
+                self.scan_next_room()
             return
 
         # 3. 검토 루프 시작 (첫 오류부터)
         completed_all = self.run_review_loop(0)
         if completed_all:
+            QMessageBox.information(self, "검토 완료", "검토가 완료되었습니다.")
             if auto_next and self.control_panel.chk_next.isChecked():
-                QMessageBox.information(self, "검토 완료", "검토가 완료되었습니다.")
-            else:
-                QMessageBox.information(self, "검토 완료", "검토가 완료되었습니다.")
+                self.scan_next_room()
 
     def run_review_loop(self, start_idx):
         """오류를 순회하며 검토하는 다이얼로그 루프."""
         current_idx = start_idx
-        
+
         while 0 <= current_idx < len(self.error_queue):
             row = self.error_queue[current_idx]
-            
+
             # (1) 데이터 준비
             read_num = row[1]
             image_path = row[4]
             result_str = row[6]
-            
+
             # "103" -> [{"q_num":1, "marked":[0]}, ...] 변환
             scan_results = self.parse_result_string(result_str)
 
@@ -60,20 +61,86 @@ class ReviewFlowMixin:
             except Exception as e:
                 print(f"이미지 로드 실패: {e}")
 
-            # (3) 다이얼로그 실행
-            dlg = ErrorCorrectionDialog(self, image_cv, scan_results, image_path)
+            # (3) 다이얼로그 실행 (정렬+디버그 오버레이)
+            debug_img = image_cv
+            try:
+                if image_cv is not None and hasattr(self, "pipeline"):
+                    aligned_img, _, _ = self.pipeline.engine.align_image_warp(image_cv)
+                    if aligned_img is not None:
+                        layout_mode = self.pipeline.form_manager.get_layout_mode()
+                        scale = self.pipeline._get_scale_factor()
+                        if self.pipeline._is_new_marker_schema():
+                            questions = (
+                                self.pipeline.engine.parse_config(self.pipeline.form_data)
+                                if "question_groups" in self.pipeline.form_data
+                                else self.pipeline.form_data.get("questions", [])
+                            )
+                            question_layout = self.pipeline.form_data.get("question_layout", {}) or {}
+                            marker_location = self.pipeline.form_data.get("marker_location", "left")
+                            _, _, debug_img, _ = self.pipeline.engine.analyze_marker_questions(
+                                aligned_img,
+                                questions,
+                                question_layout,
+                                scale=scale,
+                                marker_location=marker_location,
+                            )
+                        elif layout_mode == "side_marker":
+                            questions = self.pipeline.form_data.get("questions", [])
+                            if questions:
+                                questions = [
+                                    (q if isinstance(q, dict) else {"no": i + 1, "type": "vote"})
+                                    for i, q in enumerate(questions)
+                                ]
+                                for i, q in enumerate(questions):
+                                    if q.get("row_index") is None and q.get("y") is None:
+                                        q["row_index"] = i
+                            roi_params = self.pipeline.form_data.get("roi_params", {}) or {}
+                            marker_location = self.pipeline.form_data.get("marker_location", "left")
+                            _, _, debug_img, _ = self.pipeline.engine.analyze_side_marker_sheet(
+                                aligned_img, questions, roi_params, scale=scale, marker_location=marker_location
+                            )
+                        elif layout_mode == "timing_mark":
+                            timing_params = self.pipeline.form_data.get("timing_mark", {}) or {}
+                            left_ratio = float(timing_params.get("left_ratio", 0.08))
+                            x_offset_ratio = float(timing_params.get("x_offset_ratio", 0.3))
+                            box_w_ratio = float(timing_params.get("box_w_ratio", 0.04))
+                            box_h_ratio = float(timing_params.get("box_h_ratio", 0.02))
+                            pixel_ratio = float(timing_params.get("pixel_ratio", self.pipeline.engine.pixel_threshold))
+
+                            aligned_img, rows, anchor_x, xs_list = self.pipeline.engine.find_timing_marks_aligned(
+                                aligned_img, left_ratio=left_ratio
+                            )
+                            if rows:
+                                _, debug_img = self.pipeline.engine.read_answers(
+                                    aligned_img,
+                                    rows,
+                                    anchor_x=anchor_x,
+                                    x_offset_ratio=x_offset_ratio,
+                                    box_w_ratio=box_w_ratio,
+                                    box_h_ratio=box_h_ratio,
+                                    pixel_threshold=pixel_ratio,
+                                )
+                            else:
+                                debug_img = aligned_img
+                        else:
+                            rois = self.pipeline.form_manager.get_fixed_rois(scale=scale)
+                            _, _, debug_img = self.pipeline.engine.analyze_sheet_cv(aligned_img, rois)
+            except Exception as e:
+                print(f"[REVIEW] debug overlay 실패: {e}")
+
+            dlg = ErrorCorrectionDialog(self, debug_img, scan_results, image_path)
             session_total = max(0, self.total_read - self.session_start_read_num + 1)
             dlg.lbl_idx.setText(f"{current_idx + 1}/{session_total}")  # 오류 순번/세션 총 검사 수
-            
+
             # exec_() 호출 시 창을 닫을 때까지 대기
-            dlg.exec_() 
+            dlg.exec_()
 
             # (4) 종료 코드 확인 (Dialog에서 exit_code 설정 필요)
-            exit_code = getattr(dlg, 'exit_code', 0)
+            exit_code = getattr(dlg, "exit_code", 0)
 
             if exit_code == 0:  # 그냥 종료 (X버튼) -> 루프 종료
                 break
-            
+
             elif exit_code == 1:  # 저장(S) -> 다음으로
                 self.save_corrected_data(row, dlg.scan_results)
                 self.controller.update_review_done(self.current_db_path, read_num, 1)
@@ -99,7 +166,7 @@ class ReviewFlowMixin:
         # 루프 종료 후 통계 갱신
         self.update_statistics()
         if current_idx >= len(self.error_queue):
-             return True
+            return True
         return False
 
     def _find_next_unreviewed_index(self, start_idx: int, direction: int = 1):
@@ -120,17 +187,19 @@ class ReviewFlowMixin:
         for i, char in enumerate(result_str):
             marked = []
             status = "정상"
-            
-            if char == '1': marked = [0]       # 찬성
-            elif char == '2': marked = [1]     # 반대
-            elif char == '3':                  # 중복
+
+            if char == "1":
+                marked = [0]  # 찬성
+            elif char == "2":
+                marked = [1]  # 반대
+            elif char == "3":  # 중복
                 marked = [0, 1]
                 status = "중복"
-            elif char == '0':                  # 공백
+            elif char == "0":  # 공백
                 marked = []
                 status = "공백"
-            
-            parsed.append({'q_num': i+1, 'marked': marked, 'status': status})
+
+            parsed.append({"q_num": i + 1, "marked": marked, "status": status})
         return parsed
 
     def save_corrected_data(self, original_row, modified_results):
@@ -157,16 +226,63 @@ class ReviewFlowMixin:
         debug_img = image_cv
         try:
             if image_cv is not None and hasattr(self, "pipeline") and isinstance(self.pipeline.form_data, dict):
-                aligned_img, _, _ = self.pipeline.engine.align_image(image_cv)
+                aligned_img, _, _ = self.pipeline.engine.align_image_warp(image_cv)
                 if aligned_img is not None:
                     scale = self.pipeline._get_scale_factor()
                     layout_mode = self.pipeline.form_manager.get_layout_mode()
-                    if layout_mode == "side_marker":
-                        questions = self.pipeline.form_data.get("questions", [])
-                        roi_params = self.pipeline.form_data.get("roi_params", {}) or {}
-                        _, _, debug_img, _ = self.pipeline.engine.analyze_side_marker_sheet(
-                            aligned_img, questions, roi_params, scale=scale
+                    if self.pipeline._is_new_marker_schema():
+                        questions = (
+                            self.pipeline.engine.parse_config(self.pipeline.form_data)
+                            if "question_groups" in self.pipeline.form_data
+                            else self.pipeline.form_data.get("questions", [])
                         )
+                        question_layout = self.pipeline.form_data.get("question_layout", {}) or {}
+                        marker_location = self.pipeline.form_data.get("marker_location", "left")
+                        _, _, debug_img, _ = self.pipeline.engine.analyze_marker_questions(
+                            aligned_img,
+                            questions,
+                            question_layout,
+                            scale=scale,
+                            marker_location=marker_location,
+                        )
+                    elif layout_mode == "side_marker":
+                        questions = self.pipeline.form_data.get("questions", [])
+                        if questions:
+                            questions = [
+                                (q if isinstance(q, dict) else {"no": i + 1, "type": "vote"})
+                                for i, q in enumerate(questions)
+                            ]
+                            for i, q in enumerate(questions):
+                                if q.get("row_index") is None and q.get("y") is None:
+                                    q["row_index"] = i
+                        roi_params = self.pipeline.form_data.get("roi_params", {}) or {}
+                        marker_location = self.pipeline.form_data.get("marker_location", "left")
+                        _, _, debug_img, _ = self.pipeline.engine.analyze_side_marker_sheet(
+                            aligned_img, questions, roi_params, scale=scale, marker_location=marker_location
+                        )
+                    elif layout_mode == "timing_mark":
+                        timing_params = self.pipeline.form_data.get("timing_mark", {}) or {}
+                        left_ratio = float(timing_params.get("left_ratio", 0.08))
+                        x_offset_ratio = float(timing_params.get("x_offset_ratio", 0.3))
+                        box_w_ratio = float(timing_params.get("box_w_ratio", 0.04))
+                        box_h_ratio = float(timing_params.get("box_h_ratio", 0.02))
+                        pixel_ratio = float(timing_params.get("pixel_ratio", self.pipeline.engine.pixel_threshold))
+
+                        aligned_img, rows, anchor_x, xs_list = self.pipeline.engine.find_timing_marks_aligned(
+                            aligned_img, left_ratio=left_ratio
+                        )
+                        if rows:
+                            _, debug_img = self.pipeline.engine.read_answers(
+                                aligned_img,
+                                rows,
+                                anchor_x=anchor_x,
+                                x_offset_ratio=x_offset_ratio,
+                                box_w_ratio=box_w_ratio,
+                                box_h_ratio=box_h_ratio,
+                                pixel_threshold=pixel_ratio,
+                            )
+                        else:
+                            debug_img = aligned_img
                     else:
                         rois = self.pipeline.form_manager.get_fixed_rois(scale=scale)
                         _, _, debug_img = self.pipeline.engine.analyze_sheet_cv(aligned_img, rois)
@@ -177,7 +293,7 @@ class ReviewFlowMixin:
         dlg.lbl_idx.setText(str(read_num))
         dlg.exec_()
 
-        exit_code = getattr(dlg, 'exit_code', 0)
+        exit_code = getattr(dlg, "exit_code", 0)
         if exit_code == 1:
             self.save_corrected_data(row_data, dlg.scan_results)
             self.update_statistics()
@@ -201,12 +317,21 @@ class ReviewFlowMixin:
         task.signals.error.connect(self._on_summary_error)
         self.thread_pool.start(task)
 
-    def _apply_review_summary(self, total_in_session, review_count, blank_cnt, dup_cnt, invalid_cnt, roster_missing_cnt, absent_cnt):
+    def _apply_review_summary(
+        self,
+        total_in_session,
+        review_count,
+        blank_cnt,
+        dup_cnt,
+        invalid_cnt,
+        roster_missing_cnt,
+        absent_cnt,
+    ):
         if total_in_session > 0:
             self.lbl_check.setText(f"{review_count}/{total_in_session}")
             self.lbl_review_detail.setText(
                 f"오류:{invalid_cnt}  중복:{dup_cnt}  공백:{blank_cnt}  "
-                f"명단미등록{roster_missing_cnt}  결시:{absent_cnt}"
+                f"명단미등록:{roster_missing_cnt}  결시:{absent_cnt}"
             )
 
     def _update_review_status_in_grid(self, read_num: int, status: str):
@@ -273,8 +398,3 @@ class ReviewFlowMixin:
                     elif review_status == "완료":
                         status_cell.setForeground(Qt.blue)
                 break
-
-
-
-
-

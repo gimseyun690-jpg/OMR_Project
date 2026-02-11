@@ -1,4 +1,4 @@
-import cv2
+﻿import cv2
 import numpy as np
 import os
 
@@ -15,10 +15,20 @@ class OMREngine:
         self.pixel_threshold = 0.05
 
         # ===== 마커 옵션 =====
-        self.marker_thresh = 120
+        self.marker_thresh = 215
+        self.global_offset_x = 0
+        self.global_offset_y = 0
 
 
-    def configure(self, block_size=None, pixel_ratio=None, marker_thresh=None, C=None):
+    def configure(
+        self,
+        block_size=None,
+        pixel_ratio=None,
+        marker_thresh=None,
+        C=None,
+        global_offset_x=None,
+        global_offset_y=None,
+    ):
         """외부 설정 적용"""
         if block_size is not None:
             self.block_size = int(block_size)
@@ -34,12 +44,59 @@ class OMREngine:
         if C is not None:
             self.C = int(C)
 
+        if global_offset_x is not None:
+            self.global_offset_x = int(global_offset_x)
+        if global_offset_y is not None:
+            self.global_offset_y = int(global_offset_y)
 
     def load_image(self, image_path):
         if not os.path.exists(image_path): return None
         img_array = np.fromfile(image_path, np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
         return img
+
+    def parse_config(self, config):
+        if not isinstance(config, dict):
+            return []
+
+        layout_defaults = config.get("layout_defaults", {})
+        if not isinstance(layout_defaults, dict):
+            layout_defaults = {}
+
+        question_groups = config.get("question_groups", [])
+        if not isinstance(question_groups, list):
+            return []
+
+        expanded = []
+
+        for group in question_groups:
+            if not isinstance(group, dict):
+                continue
+
+            try:
+                start_no = int(group.get("start_no", 1))
+                count = int(group.get("count", 0))
+                start_row_index = int(group.get("start_row_index", 0))
+            except Exception:
+                continue
+
+            if count <= 0:
+                continue
+
+            group_overrides = {
+                k: v
+                for k, v in group.items()
+                if k not in ("start_no", "count", "start_row_index")
+            }
+
+            for i in range(count):
+                q = dict(layout_defaults)
+                q.update(group_overrides)
+                q["no"] = start_no + i
+                q["row_index"] = start_row_index + i
+                expanded.append(q)
+
+        return expanded
 
     def reorder(self, myPoints):
         """좌상, 우상, 우하, 좌하 순서 정렬"""
@@ -55,18 +112,26 @@ class OMREngine:
 
     def align_image(self, img):
         """
-        [수정됨] "가장 큰 사각형 찾기(Warp)" 로직 완전 삭제
-        - 이유: 표 테두리를 종이로 착각해 강제로 늘리면 좌표 비율이 깨짐.
-        - 변경: 단순히 엔진 표준 해상도(1240x1754)로 리사이즈만 수행.
+        입력 이미지를 기준 해상도(150dpi, 1240x1754)로 맞춤
         """
         if img is None: 
             return None, False, "image_none"
-        
-        # 복잡한 지능형 처리 다 버리고, 무식하게 크기만 맞춥니다.
-        # 이렇게 해야 원본 비율이 유지되어 '거리(Distance)' 기반 좌표가 정확히 맞습니다.
-        img_resized = cv2.resize(img, (self.width, self.height))
-        
-        return img_resized, True, "resize_only"
+        h, w = img.shape[:2]
+        if w == self.width and h == self.height:
+            return img, True, "original"
+
+        # 업/다운 스케일에 따라 보간 방식 선택
+        if w > self.width or h > self.height:
+            interp = cv2.INTER_AREA
+        else:
+            interp = cv2.INTER_CUBIC
+
+        resized = cv2.resize(img, (self.width, self.height), interpolation=interp)
+        return resized, True, "resized"
+
+    def align_image_warp(self, img):
+        """호환용 래퍼: 현재는 기준 해상도 리사이즈만 수행"""
+        return self.align_image(img)
 
     def _clamp_roi(self, image, x, y, w, h):
         if image is None or w <= 0 or h <= 0: return None
@@ -81,10 +146,10 @@ class OMREngine:
     # =========================================================
     def _preprocess_image(self, img):
         """크기 보정 -> Gray -> Adaptive Threshold -> Morphology"""
-        if (img.shape[1] != self.width) or (img.shape[0] != self.height):
-            work_img = cv2.resize(img, (self.width, self.height))
-        else:
-            work_img = img.copy()
+        # [안전장치 추가] 이미지가 없으면 그냥 빈 값 반환
+        if img is None:
+            return None, None
+        work_img = img.copy()
 
         img_gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
         binary_img = cv2.adaptiveThreshold(
@@ -99,28 +164,37 @@ class OMREngine:
         return work_img, processed_img
 
     # =========================================================
-    # [NEW] 사이드 마커 감지 (이전 코드 복구)
+    # [NEW] 멀티 방향 마커 감지
     # =========================================================
-    def find_side_markers(self, image):
+    def find_markers(self, image, location="left", min_count=3):
         """
-        [최종 수정] 사이드 마커 인식 강화
-        1. AdaptiveThreshold 제거 -> 고정 Threshold 사용 (하늘색 배경/글자 무시)
-        2. Solidity(밀도) 필터 강화 -> 글자 무시
-        3. Vertical Line Alignment (수직 정렬) -> 표 내부의 점 무시
+        location: left/right/top/bottom
+        - ROI 10% 우선, 실패 시 20%로 재시도
+        - Vertical: left/right (X 그룹핑)
+        - Horizontal: top/bottom (Y 그룹핑)
         """
-        try:
-            if image is None: return []
+        def _detect_in_roi(img, loc, ratio):
+            if img is None:
+                return []
+            H, W = img.shape[:2]
 
-            H, W = image.shape[:2]
-            
-            # 1. 전처리: 그냥 흑백 변환 후 '진한 검은색'만 남김
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            
-            # 배경이 흰색/하늘색이고 마커가 진한 검은색이므로 
-            # 100 이하는 검은색(1), 나머지는 흰색(0)으로 만드는게 훨씬 깔끔함
-            _, binary = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
+            loc = str(loc).strip().lower()
+            if loc == "right":
+                roi = (int(W * (1.0 - ratio)), 0, W - int(W * (1.0 - ratio)), H)
+            elif loc == "top":
+                roi = (0, 0, W, int(H * ratio))
+            elif loc == "bottom":
+                roi = (0, int(H * (1.0 - ratio)), W, H - int(H * (1.0 - ratio)))
+            else:
+                roi = (0, 0, int(W * ratio), H)
 
-            # 노이즈(작은 점) 제거
+            rx, ry, rw, rh = roi
+            if rw <= 0 or rh <= 0:
+                return []
+
+            roi_img = img[ry:ry + rh, rx:rx + rw]
+            gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
+            _, binary = cv2.threshold(gray, int(self.marker_thresh), 255, cv2.THRESH_BINARY_INV)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
             binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
 
@@ -128,69 +202,512 @@ class OMREngine:
             contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
 
             candidates = []
-            
-            # 면적 필터 (150dpi ~ 300dpi 대응)
-            # 너무 작으면 점, 너무 크면 표 테두리
-            min_area = W * H * 0.0001
-            max_area = W * H * 0.01
+            min_area = rw * rh * 0.0001
+            max_area = rw * rh * 0.01
 
             for cnt in contours:
                 area = cv2.contourArea(cnt)
-                if area < min_area or area > max_area: continue
-                
+                if area < min_area or area > max_area:
+                    continue
+
                 x, y, w, h = cv2.boundingRect(cnt)
-                
-                # [조건 1] 위치: 종이의 왼쪽 20% 안에 있어야 함
-                if x > (W * 0.20): continue 
+                x += rx
+                y += ry
 
-                # [조건 2] 비율: 정사각형에 가까워야 함 (0.6 ~ 1.6)
-                ratio = float(w) / h
-                if not (0.6 <= ratio <= 1.6): continue
+                ratio_wh = float(w) / h if h > 0 else 0.0
+                if not (0.5 <= ratio_wh <= 2.0):
+                    continue
 
-                # [조건 3] 밀도(Solidity): ★핵심★
-                # 글자는 획 사이가 비어있어서 hull 대비 area 비율이 낮음
                 hull = cv2.convexHull(cnt)
                 hull_area = cv2.contourArea(hull)
-                if hull_area == 0: continue
+                if hull_area == 0:
+                    continue
                 solidity = float(area) / hull_area
-                
-                # 마커는 꽉 찬 네모이므로 0.85 이상 나와야 함
-                if solidity < 0.85: continue
+                if solidity < 0.8:
+                    continue
 
-                candidates.append({'cx': x + w // 2, 'cy': y + h // 2, 'x': x})
+                candidates.append({"cx": x + w // 2, "cy": y + h // 2, "x": x, "y": y})
 
+            return candidates
+
+        try:
+            if image is None:
+                return []
+
+            loc = str(location).strip().lower()
+            candidates = _detect_in_roi(image, loc, 0.10)
+            if not candidates:
+                candidates = _detect_in_roi(image, loc, 0.20)
             if not candidates:
                 return []
 
-            # [조건 4] 수직 정렬 (Vertical Line Alignment) - 엉뚱한 점 거르기
-            # X좌표가 비슷한 것끼리 그룹핑합니다.
-            candidates.sort(key=lambda c: c['x'])
-            
-            groups = []
-            if candidates:
+            if loc in ("top", "bottom"):
+                candidates.sort(key=lambda c: c["y"])
+                groups = []
                 current_group = [candidates[0]]
                 for i in range(1, len(candidates)):
-                    # X좌표 차이가 10픽셀(150dpi 기준) 이내면 같은 라인으로 간주
-                    if abs(candidates[i]['x'] - candidates[i-1]['x']) < 15:
+                    if abs(candidates[i]["y"] - candidates[i - 1]["y"]) < 15:
                         current_group.append(candidates[i])
                     else:
                         groups.append(current_group)
                         current_group = [candidates[i]]
                 groups.append(current_group)
 
-            # 가장 많은 점이 모여있는 그룹이 '진짜 마커 라인'일 확률이 높음
-            best_group = max(groups, key=len)
-            
-            # 만약 개수가 같은 그룹이 있다면, 더 왼쪽에 있는 그룹을 선택 (사이드 마커니까)
-            # (여기서는 간단히 가장 긴 그룹 선택)
+                groups = [g for g in groups if len(g) >= int(min_count)]
+                if not groups:
+                    return []
 
-            # Y축 정렬 후 반환
-            best_group.sort(key=lambda c: c['cy'])
+                if loc == "top":
+                    best_group = min(groups, key=lambda g: np.median([c["y"] for c in g]))
+                else:
+                    best_group = max(groups, key=lambda g: np.median([c["y"] for c in g]))
+
+                best_group.sort(key=lambda c: c["cx"])
+                span_x = max(c["cx"] for c in best_group) - min(c["cx"] for c in best_group)
+                if span_x < (image.shape[1] * 0.3):
+                    return []
+                return best_group
+
+            candidates.sort(key=lambda c: c["x"])
+            groups = []
+            current_group = [candidates[0]]
+            for i in range(1, len(candidates)):
+                if abs(candidates[i]["x"] - candidates[i - 1]["x"]) < 15:
+                    current_group.append(candidates[i])
+                else:
+                    groups.append(current_group)
+                    current_group = [candidates[i]]
+            groups.append(current_group)
+
+            groups = [g for g in groups if len(g) >= int(min_count)]
+            if not groups:
+                return []
+
+            if loc == "right":
+                best_group = max(groups, key=lambda g: np.median([c["x"] for c in g]))
+            else:
+                best_group = min(groups, key=lambda g: np.median([c["x"] for c in g]))
+
+            best_group.sort(key=lambda c: c["cy"])
+            span_y = max(c["cy"] for c in best_group) - min(c["cy"] for c in best_group)
+            if span_y < (image.shape[0] * 0.3):
+                return []
             return best_group
 
         except Exception as e:
             print(f"[ERROR] Find Markers: {e}")
             return []
+
+    def find_side_markers(self, image):
+        """호환용 래퍼 (left 고정)"""
+        return self.find_markers(image, location="left", min_count=3)
+
+    def ensure_gross_rotation(self, original_img):
+        """
+        [수정됨] 0도(원본) 우선 정책 적용
+        - 0, 90, 180, 270도를 체크하되,
+        - 0도에서 마커가 어느 정도(예: 8개 이상) 잡히면,
+          다른 각도가 '압도적으로(1.3배)' 많지 않는 한 0도를 유지합니다.
+        """
+        if original_img is None:
+            return None, 0, []
+
+        # 속도를 위해 리사이즈 (가로 800px)
+        small_img = original_img
+        h0, w0 = original_img.shape[:2]
+        scale_factor = 1.0
+        if w0 > 800:
+            scale_factor = 800.0 / float(w0)
+            new_h = max(1, int(h0 * scale_factor))
+            small_img = cv2.resize(original_img, (800, new_h), interpolation=cv2.INTER_AREA)
+
+        # 1. 일단 0도(원본)부터 검사
+        markers_0 = self.find_side_markers(small_img)
+        count_0 = len(markers_0)
+
+        best_img = small_img # 반환은 나중에 원본으로 교체
+        best_k = 0
+        best_markers = markers_0
+        best_count = count_0
+
+        # 0도에서 마커가 충분히 발견되었다면 방어적으로 동작
+        # (예: 10개 이상 찾았으면, 다른 각도는 1.3배 이상이어야 교체)
+        is_valid_0 = (count_0 >= 8) 
+        threshold_multiplier = 1.3 if is_valid_0 else 1.0
+
+        # 2. 나머지 각도(90, 180, 270) 검사
+        rotations = [
+            (1, cv2.ROTATE_90_CLOCKWISE),
+            (2, cv2.ROTATE_180),
+            (3, cv2.ROTATE_90_COUNTERCLOCKWISE),
+        ]
+
+        for k, rot in rotations:
+            img = cv2.rotate(small_img, rot)
+            markers = self.find_side_markers(img)
+            count = len(markers)
+
+            # [핵심] 단순 비교가 아니라 '가산점' 적용 비교
+            if count > (best_count * threshold_multiplier):
+                best_count = count
+                best_k = k
+                best_markers = markers
+                # 새로운 베스트가 발견되면, 기준점이 높아졌으므로 멀티플라이어는 초기화하거나 유지
+                # 여기서는 단순히 갱신만 함 (더 좋은게 나오면 바꿈)
+        
+        # 3. 최종 결정된 k에 맞춰 원본 이미지 회전 반환
+        if best_k == 0:
+            final_img = original_img
+            # 0도일 때는 small_img에서 찾은 마커 좌표를 원본 스케일로 복원해야 함
+            if scale_factor != 1.0:
+                restored_markers = []
+                for m in best_markers:
+                    restored_markers.append({
+                        "cx": int(m["cx"] / scale_factor),
+                        "cy": int(m["cy"] / scale_factor),
+                        "x": int(m["x"] / scale_factor)
+                    })
+                best_markers = restored_markers
+            else:
+                best_markers = best_markers
+
+        elif best_k == 1:
+            final_img = cv2.rotate(original_img, cv2.ROTATE_90_CLOCKWISE)
+            # 회전된 상태에서는 좌표계가 바뀌므로 마커를 다시 찾는 게 가장 안전하고 정확함
+            best_markers = self.find_side_markers(final_img)
+        elif best_k == 2:
+            final_img = cv2.rotate(original_img, cv2.ROTATE_180)
+            best_markers = self.find_side_markers(final_img)
+        else:
+            final_img = cv2.rotate(original_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            best_markers = self.find_side_markers(final_img)
+
+        return final_img, best_k, best_markers
+
+    def ensure_correct_orientation(self, image, expected_location="left", min_keep=3, prefer_multiplier=1.3):
+        """
+        expected_location 기준으로 0/90/180/270 회전 중
+        가장 마커가 잘 검출되는 방향을 선택
+        """
+        if image is None:
+            return None, []
+
+        expected = str(expected_location).strip().lower()
+        markers_0 = self.find_markers(image, location=expected)
+        best_img = image
+        best_markers = markers_0
+        best_count = len(markers_0)
+
+        threshold = best_count * prefer_multiplier if best_count >= min_keep else best_count
+
+        rotations = [
+            (1, cv2.ROTATE_90_CLOCKWISE),
+            (2, cv2.ROTATE_180),
+            (3, cv2.ROTATE_90_COUNTERCLOCKWISE),
+        ]
+
+        for _, rot in rotations:
+            rotated = cv2.rotate(image, rot)
+            markers = self.find_markers(rotated, location=expected)
+            count = len(markers)
+            if best_count >= min_keep and count <= threshold:
+                continue
+            if count > best_count:
+                best_count = count
+                best_markers = markers
+                best_img = rotated
+
+        return best_img, best_markers
+
+    def _interpolate_missing_marks(self, markers):
+        if not markers or len(markers) < 2:
+            return markers
+        markers_sorted = sorted(markers, key=lambda m: m["cy"])
+        ys = [m["cy"] for m in markers_sorted]
+        gaps = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+        if not gaps:
+            return markers_sorted
+        median_gap = float(np.median(gaps))
+        if median_gap <= 0:
+            return markers_sorted
+
+        new_marks = []
+        for i in range(len(markers_sorted) - 1):
+            cur_m = markers_sorted[i]
+            next_m = markers_sorted[i + 1]
+            new_marks.append(cur_m)
+            gap = next_m["cy"] - cur_m["cy"]
+            if gap >= 1.8 * median_gap:
+                insert_count = int(round(gap / median_gap)) - 1
+                insert_count = max(1, insert_count)
+                for j in range(insert_count):
+                    t = (j + 1) / float(insert_count + 1)
+                    cx = int(round(cur_m["cx"] + (next_m["cx"] - cur_m["cx"]) * t))
+                    cy = int(round(cur_m["cy"] + (next_m["cy"] - cur_m["cy"]) * t))
+                    new_marks.append({"cx": cx, "cy": cy, "interpolated": True})
+        new_marks.append(markers_sorted[-1])
+        return sorted(new_marks, key=lambda m: m["cy"])
+
+    def correct_rotation_by_markers(self, image, rows, xs_list):
+        import numpy as np
+        import cv2
+
+        if image is None or rows is None or xs_list is None:
+            return image
+
+        h, w = image.shape[:2]
+        if h < 2 or w < 2 or len(rows) < 2 or len(rows) != len(xs_list):
+            return image
+
+        # 1) Preprocess & Sort
+        try:
+            y = np.asarray(rows, dtype=np.float32).reshape(-1)
+            x = np.asarray(xs_list, dtype=np.float32).reshape(-1)
+            valid = np.isfinite(x) & np.isfinite(y)
+            x, y = x[valid], y[valid]
+        except Exception:
+            return image
+
+        if len(x) < 2: return image
+
+        order = np.argsort(y)
+        x, y = x[order], y[order]
+
+        # 2) Helper function
+        def fit_line_fn(points):
+            vx, vy, x0, y0 = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
+            return float(vx), float(vy), float(x0), float(y0)
+
+        pts = np.stack([x, y], axis=1).astype(np.float32).reshape(-1, 1, 2)
+
+        try:
+            # 3) First fit
+            vx, vy, x0, y0 = fit_line_fn(pts)
+            if abs(vy) < 1e-6: return image # 수평선이면 패스
+
+            # 4) Outlier Removal (Distance normalization)
+            n0, n1 = -vy, vx
+            denom = (n0**2 + n1**2)**0.5 + 1e-9
+            d = np.abs((pts[:, 0, 0] - x0) * n0 + (pts[:, 0, 1] - y0) * n1) / denom
+
+            if len(d) > 5:
+                keep_thr = np.percentile(d, 85.0)
+                inliers = pts[d <= keep_thr]
+                if len(inliers) >= 2:
+                    # [수정] 재피팅 수행
+                    vx, vy, x0, y0 = fit_line_fn(inliers)
+                    # [중요] 재피팅 후에도 수직/수평 체크 필수 (Division by zero 방지)
+                    if abs(vy) < 1e-6: return image
+
+            # 5) Angle Calculation
+            angle_deg = float(np.degrees(np.arctan2(vy, vx)))
+            rotate_deg = 90.0 - angle_deg
+
+            # Normalize [-90, 90]
+            if rotate_deg > 90.0:
+                rotate_deg -= 180.0
+            elif rotate_deg < -90.0:
+                rotate_deg += 180.0
+
+            # 6) Safety Guards
+            # 스캐너가 12도 이상 삐뚤어질 일은 없음 -> 노이즈로 판단
+            if abs(rotate_deg) > 12.0:
+                return image
+            # 너무 미세한 각도는 보간 화질 저하를 막기 위해 스킵
+            if abs(rotate_deg) < 0.05:
+                return image
+
+            # 7) Pivot Calculation (Median Y Strategy)
+            # 중앙값(Median)을 사용하여 이상치에 의한 회전축 쏠림 방지
+            pivot_y = float(np.median(y))
+            pivot_y = float(np.clip(pivot_y, 0.0, float(h - 1)))
+            
+            # 직선 방정식: x = x0 + (y - y0) * (vx/vy)
+            k = float(vx / vy) 
+            pivot_x = float(x0 + (pivot_y - y0) * k)
+            
+            # Pivot Clamp
+            pivot_x = float(np.clip(pivot_x, 0.0, float(w - 1)))
+            center = (pivot_x, pivot_y)
+
+            # 8) Warp
+            M = cv2.getRotationMatrix2D(center, rotate_deg, 1.0)
+            corrected = cv2.warpAffine(
+                image, 
+                M, 
+                (w, h),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(255, 255, 255)
+            )
+            return corrected
+
+        except Exception as e:
+            # print(f"[WARN] Rotation Failed: {e}")
+            return image
+
+    def _fit_marker_line(self, rows, xs_list):
+        try:
+            rows_arr = np.asarray(rows, dtype=np.float32)
+            xs_arr = np.asarray(xs_list, dtype=np.float32)
+            valid = np.isfinite(rows_arr) & np.isfinite(xs_arr)
+            rows_arr = rows_arr[valid]
+            xs_arr = xs_arr[valid]
+        except Exception:
+            return None
+
+        if len(rows_arr) < 2:
+            return None
+
+        order = np.argsort(rows_arr)
+        rows_arr = rows_arr[order]
+        xs_arr = xs_arr[order]
+
+        try:
+            slope, intercept = np.polyfit(rows_arr, xs_arr, 1)
+            preds = slope * rows_arr + intercept
+            residuals = xs_arr - preds
+            rms = float(np.sqrt(np.mean(residuals ** 2))) if len(residuals) > 0 else 0.0
+        except Exception:
+            return None
+
+        return {
+            "rows": rows_arr,
+            "xs": xs_arr,
+            "slope": float(slope),
+            "intercept": float(intercept),
+            "rms": rms,
+            "count": int(len(rows_arr)),
+        }
+
+    # =========================================================
+    # [NEW] 타이밍 마크 검출/정렬 (Pipeline에서 이관됨)
+    # =========================================================
+    def find_timing_marks(self, image, left_ratio=0.08):
+        """
+        타이밍 마크(좌측 정렬 마커) 검출
+        return: (rows, anchor_x, xs_list)
+        """
+        if image is None:
+            return [], 0, []
+
+        H, W = image.shape[:2]
+        left_limit = int(W * float(left_ratio))
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, int(self.marker_thresh), 255, cv2.THRESH_BINARY_INV)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        contours_info = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
+
+        candidates = []
+        min_area = W * H * 0.0001
+        max_area = W * H * 0.01
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < min_area or area > max_area:
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            if x > left_limit:
+                continue
+
+            ratio = float(w) / h if h > 0 else 0
+            if not (0.6 <= ratio <= 1.6):
+                continue
+
+            hull = cv2.convexHull(cnt)
+            hull_area = cv2.contourArea(hull)
+            if hull_area == 0:
+                continue
+            solidity = float(area) / hull_area
+            if solidity < 0.85:
+                continue
+
+            candidates.append({"cx": x + w // 2, "cy": y + h // 2})
+
+        if not candidates:
+            return [], 0, []
+
+        candidates.sort(key=lambda c: c["cy"])
+        rows = [c["cy"] for c in candidates]
+        xs_list = [c["cx"] for c in candidates]
+        anchor_x = int(np.median(xs_list)) if xs_list else 0
+        return rows, anchor_x, xs_list
+
+    def find_timing_marks_aligned(self, image, left_ratio=0.08):
+        """
+        타이밍 마크 기준으로 미세 회전 보정까지 수행한 결과 반환
+        return: (aligned_img, rows, anchor_x, xs_list)
+        """
+        if image is None:
+            return None, [], 0, []
+
+        rows, anchor_x, xs_list = self.find_timing_marks(image, left_ratio=left_ratio)
+        if len(xs_list) >= 2 and abs(xs_list[-1] - xs_list[0]) > 1:
+            corrected = self.correct_rotation_by_markers(image, rows, xs_list)
+            if corrected is not None:
+                image = corrected
+            rows, anchor_x, xs_list = self.find_timing_marks(image, left_ratio=left_ratio)
+
+        return image, rows, anchor_x, xs_list
+
+    def read_answers(
+        self,
+        image,
+        rows,
+        anchor_x=0,
+        x_offset_ratio=0.3,
+        box_w_ratio=0.04,
+        box_h_ratio=0.02,
+        pixel_threshold=None,
+    ):
+        """
+        타이밍 마크 기반 단일 마킹 판독
+        return: (marks, debug_img)
+        """
+        if image is None:
+            return [], None
+
+        work_img, processed_img = self._preprocess_image(image)
+        debug_img = work_img.copy() if work_img is not None else None
+
+        if processed_img is None or not rows:
+            return [], debug_img
+
+        if pixel_threshold is None:
+            pixel_threshold = self.pixel_threshold
+
+        H, W = processed_img.shape[:2]
+        box_w = max(1, int(W * float(box_w_ratio)))
+        box_h = max(1, int(H * float(box_h_ratio)))
+        x_offset = int(W * float(x_offset_ratio))
+
+        marks = []
+        for row_y in rows:
+            rx = int(anchor_x + x_offset)
+            ry = int(row_y - (box_h // 2))
+
+            c = self._clamp_roi(processed_img, rx, ry, box_w, box_h)
+            if c is None:
+                marks.append(False)
+                continue
+
+            x, y, w, h = c
+            roi = processed_img[y:y + h, x:x + w]
+            ratio = cv2.countNonZero(roi) / (w * h) if w * h > 0 else 0.0
+            is_marked = ratio > float(pixel_threshold)
+            marks.append(is_marked)
+
+            if debug_img is not None:
+                color = (0, 255, 0) if is_marked else (0, 0, 255)
+                cv2.rectangle(debug_img, (x, y), (x + w, y + h), color, 1)
+
+        return marks, debug_img
+
 
 
     # =========================================================
@@ -225,21 +742,37 @@ class OMREngine:
     # =========================================================
     # [수정] 2. 사이드 마커 기반 동적 판독
     # =========================================================
-    def analyze_side_marker_sheet(self, original_img, questions, params, scale=1.0):
+    def analyze_side_marker_sheet(self, original_img, questions, params, scale=1.0, marker_location="left"):
         """
         :param scale: 300dpi 좌표를 150dpi 이미지에 맞추기 위한 비율 (0.5 등)
         """
         if original_img is None: return "ERROR", [], None, "IMG_NONE"
 
-        work_img, processed_img = self._preprocess_image(original_img)
+        rotated_img, markers = self.ensure_correct_orientation(original_img, expected_location=marker_location)
+        if rotated_img is None:
+            return "ERR", [], None, "IMG_NONE"
+
+        base_img = rotated_img
+
+        # Fine-tuning (skew correction) using markers
+        markers = self.find_markers(base_img, location=marker_location, min_count=3)
+        if markers and len(markers) >= 5:
+            if str(marker_location).strip().lower() in ("top", "bottom"):
+                rows = [m["cx"] for m in markers]
+                xs_list = [m["cy"] for m in markers]
+            else:
+                rows = [m["cy"] for m in markers]
+                xs_list = [m["cx"] for m in markers]
+
+            corrected = self.correct_rotation_by_markers(base_img, rows, xs_list)
+            if corrected is not None:
+                base_img = corrected
+                markers = self.find_markers(base_img, location=marker_location, min_count=3)
+
+        work_img, processed_img = self._preprocess_image(base_img)
         debug_img = work_img.copy()
 
-        # 1. 마커 찾기
-        markers = self.find_side_markers(work_img)
-        
-        # [안전장치] 마커가 하나도 안 잡혔다면? -> 전처리 이미지가 너무 깨졌을 수 있음. 원본으로 재시도
-        if not markers:
-            markers = self.find_side_markers(original_img)
+        markers = self._interpolate_missing_marks(markers)
 
         if len(markers) < len(questions):
             # 디버깅을 위해 찾은 마커라도 표시
@@ -266,28 +799,61 @@ class OMREngine:
         dist_agree = int(raw_dist_agree * scale)
         dist_disagree = int(raw_dist_disagree * scale)
 
+        # Auto-scale based on current image width vs baseline width
+        img_h, img_w = work_img.shape[:2]
+        width_ratio = (float(img_w) / float(self.width)) if self.width > 0 else 1.0
+        if width_ratio < 0.90:
+            width_ratio = 0.90
+        elif width_ratio > 3.0:
+            width_ratio = 3.0
+
         sheet_results = []
         has_error = False
         error_reason = ""
 
+        # Build mapping: row_index or y matching
+        if str(marker_location).strip().lower() in ("top", "bottom"):
+            marks_by_axis = sorted(markers, key=lambda m: m["cx"])
+        else:
+            marks_by_axis = sorted(markers, key=lambda m: m["cy"])
+
         for i, q in enumerate(questions):
             q_num = q.get("no", i + 1)
-            
-            # 마커가 부족하면 루프 중단 (IndexError 방지)
-            if i >= len(markers):
-                sheet_results.append({"q_num": q_num, "marked": [], "status": "마커없음"})
-                has_error = True
-                continue
+            row_index = q.get("row_index")
+            q_y = q.get("y")
 
-            # 마커 기반 좌표 계산
-            base_cx = markers[i]['cx']
-            base_cy = markers[i]['cy']
-            start_y = base_cy - (box_h // 2)
+            if row_index is None:
+                row_index = i
+
+            if row_index is not None and 0 <= int(row_index) < len(marks_by_axis):
+                base_mark = marks_by_axis[int(row_index)]
+            elif q_y is not None:
+                base_mark = min(marks_by_axis, key=lambda m: abs(m.get("cy", 0) - int(q_y)))
+            else:
+                if i >= len(marks_by_axis):
+                    sheet_results.append({"q_num": q_num, "marked": [], "status": "마커없음"})
+                    has_error = True
+                    continue
+                base_mark = marks_by_axis[i]
+
+            base_cx = base_mark['cx']
+            base_cy = base_mark['cy']
+            start_y = base_cy - (box_h // 2) + self.global_offset_y
 
             # 찬성(0), 반대(1) 좌표 생성
             rois = [
-                (base_cx + dist_agree, start_y, box_w, box_h),
-                (base_cx + dist_disagree, start_y, box_w, box_h)
+                (
+                    base_cx + int(dist_agree * width_ratio) + self.global_offset_x,
+                    start_y,
+                    int(box_w * width_ratio),
+                    box_h,
+                ),
+                (
+                    base_cx + int(dist_disagree * width_ratio) + self.global_offset_x,
+                    start_y,
+                    int(box_w * width_ratio),
+                    box_h,
+                ),
             ]
 
             marked_indices = []
@@ -355,6 +921,140 @@ class OMREngine:
                 error_msg = "선택과목 판독 오류"
 
         return is_ok, info, debug_img
+
+    # =========================================================
+    # [NEW] 3. 커스텀 필드 판독 (신규 폼 스키마)
+    # =========================================================
+    def analyze_custom_fields(self, original_img, fields, scale=1.0):
+        if original_img is None or not fields:
+            return False, {}, None
+
+        work_img, processed_img = self._preprocess_image(original_img)
+        debug_img = np.zeros_like(work_img) if work_img is not None else None
+
+        info = {}
+        is_ok = True
+
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            f_name = field.get("name")
+            f_type = str(field.get("type", "")).strip().lower()
+            if not f_name or not f_type:
+                continue
+
+            if f_type == "grid":
+                cfg = {
+                    "digits": field.get("digits"),
+                    "grid": field.get("grid", {}),
+                }
+                ok, val = self._decode_digit_grid(processed_img, cfg, scale, debug_img)
+                if ok:
+                    info[f_name] = val
+                else:
+                    is_ok = False
+            elif f_type == "single_choice":
+                cfg = {"choices": field.get("choices", [])}
+                ok, val = self._decode_single_choice(processed_img, cfg, scale, debug_img)
+                if ok:
+                    info[f_name] = val
+                else:
+                    is_ok = False
+
+        return is_ok, info, debug_img
+
+    # =========================================================
+    # [NEW] 4. 마커 기반 객관식 판독 (신규 폼 스키마)
+    # =========================================================
+    def analyze_marker_questions(self, original_img, questions, layout, scale=1.0, marker_location="left"):
+        if original_img is None:
+            return "ERR", [], None, "IMG_NONE"
+
+        rotated_img, markers = self.ensure_correct_orientation(original_img, expected_location=marker_location)
+        if rotated_img is None:
+            return "ERR", [], None, "IMG_NONE"
+
+        work_img, processed_img = self._preprocess_image(rotated_img)
+        debug_img = work_img.copy() if work_img is not None else None
+
+        markers = self._interpolate_missing_marks(markers)
+        if not questions or not markers:
+            return "ERR", [], debug_img, "TIMING_MARK"
+
+        x_offset = int(float(layout.get("x_offset", 600)) * scale)
+        choice_dx = int(float(layout.get("choice_dx", 70)) * scale)
+        box_w = int(float(layout.get("box_w", 40)) * scale)
+        box_h = int(float(layout.get("box_h", 40)) * scale)
+        row_offset_y = int(float(layout.get("row_offset_y", 0)) * scale)
+        row_start_y = int(float(layout.get("row_start_y", 360)) * scale)
+        row_dy = int(float(layout.get("row_dy", 70)) * scale)
+        rows_per_col = int(layout.get("rows_per_col", 40))
+
+        sheet_results = []
+        has_error = False
+        error_reason = ""
+
+        marks_by_y = sorted(markers, key=lambda m: m["cy"])
+        marks_by_x = sorted(markers, key=lambda m: m["cx"])
+        is_horizontal = str(marker_location).strip().lower() in ("top", "bottom")
+
+        if is_horizontal and rows_per_col <= 0:
+            return "ERR", [], debug_img, "LAYOUT"
+
+        for i, q in enumerate(questions):
+            q_num = q.get("no", i + 1)
+            row_index = q.get("row_index")
+            q_y = q.get("y")
+            choices_count = int(q.get("choices", 5))
+
+            if is_horizontal:
+                col_index = q.get("col_index")
+                row_in_col = q.get("row_in_col")
+                if col_index is None or row_in_col is None:
+                    idx = int(q_num) - 1
+                    col_index = idx // rows_per_col
+                    row_in_col = idx % rows_per_col
+
+                if not (0 <= int(col_index) < len(marks_by_x)):
+                    return "ERR", [], debug_img, "TIMING_MARK"
+
+                base_mark = marks_by_x[int(col_index)]
+                base_cx = base_mark["cx"]
+                base_cy = row_start_y + (int(row_in_col) * row_dy)
+                start_y = base_cy - (box_h // 2) + self.global_offset_y + row_offset_y
+            else:
+                if row_index is not None and 0 <= int(row_index) < len(marks_by_y):
+                    base_mark = marks_by_y[int(row_index)]
+                elif q_y is not None:
+                    base_mark = min(marks_by_y, key=lambda m: abs(m["cy"] - int(q_y)))
+                else:
+                    base_mark = marks_by_y[i]
+
+                base_cx = base_mark["cx"]
+                base_cy = base_mark["cy"]
+                start_y = base_cy - (box_h // 2) + self.global_offset_y + row_offset_y
+
+            rois = []
+            for c in range(choices_count):
+                rx = base_cx + x_offset + (c * choice_dx) + self.global_offset_x
+                rois.append((rx, start_y, box_w, box_h))
+
+            marked_indices = []
+            for r_idx, (rx, ry, rw, rh) in enumerate(rois):
+                if self._check_roi(processed_img, rx, ry, rw, rh, debug_img, (0, 255, 0)):
+                    marked_indices.append(r_idx)
+
+            status = self._determine_status(marked_indices)
+            if status != "정상":
+                has_error = True
+                if not error_reason:
+                    error_reason = status
+
+            sheet_results.append({"q_num": q_num, "marked": marked_indices, "status": status})
+            if status != "정상":
+                self._draw_error_box(debug_img, rois)
+
+        return ("ERR" if has_error else "OK"), sheet_results, debug_img, error_reason
 
     # --- 내부 도우미 메서드 ---
 

@@ -240,12 +240,12 @@ class HomeInterface(QWidget):
 
         self.setStyleSheet(
             "#homeTitle { font-size: 26px; font-weight: 600; }"
-            "#homeCard { background: rgba(255, 255, 255, 0.9); "
-            "border: 1px solid rgba(0, 0, 0, 0.08); border-radius: 16px; }"
-            "#homeCard:hover { border-color: rgba(0, 120, 215, 0.7); "
-            "background: rgba(235, 245, 255, 0.95); }"
-            "#homeCard[selected=\"true\"] { border: 2px solid rgba(0, 120, 215, 0.9); "
-            "background: rgba(228, 240, 255, 0.98); }"
+            "#homeCard { background: #FFFFFF; "
+            "border: 1px solid #DDE3EA; border-radius: 16px; }"
+            "#homeCard:hover { border-color: #2E6BD9; "
+            "background: #EBF2FF; }"
+            "#homeCard[selected=\"true\"] { border: 2px solid #2E6BD9; "
+            "background: #E3EEFF; }"
             "#homeCardTitle { font-size: 18px; font-weight: 600; }"
             "#homeCardSubtitle { color: #666; }"
         )
@@ -422,9 +422,10 @@ class SettingsInterface(QWidget):
     auto_retry_changed = Signal(bool)
     error_popup_changed = Signal(bool)
     debug_save_changed = Signal(bool)
-    warp_enabled_changed = Signal(bool)
     auto_scale_dpi_changed = Signal(bool)
     dpi_changed = Signal(int)
+    global_offset_x_changed = Signal(int)
+    global_offset_y_changed = Signal(int)
     log_level_changed = Signal(str)
     locale_changed = Signal(str)
 
@@ -476,10 +477,23 @@ class SettingsInterface(QWidget):
         self.chk_auto_retry.toggled.connect(self._on_auto_retry_changed)
         self.chk_error_popup = QCheckBox("오류 팝업 표시")
         self.chk_error_popup.toggled.connect(self._on_error_popup_changed)
-        self.chk_warp = QCheckBox("이미지 워프(정렬) 사용")
-        self.chk_warp.toggled.connect(self._on_warp_enabled_changed)
         self.chk_auto_scale_dpi = QCheckBox("DPI 변경 시 좌표 자동 스케일")
         self.chk_auto_scale_dpi.toggled.connect(self._on_auto_scale_dpi_changed)
+        offset_row = QHBoxLayout()
+        offset_row.addWidget(QLabel("전역 X 오프셋"))
+        self.spin_offset_x = QSpinBox()
+        self.spin_offset_x.setRange(-2000, 2000)
+        self.spin_offset_x.setSingleStep(1)
+        self.spin_offset_x.valueChanged.connect(self._on_global_offset_x_changed)
+        offset_row.addWidget(self.spin_offset_x)
+        offset_row.addSpacing(12)
+        offset_row.addWidget(QLabel("전역 Y 오프셋"))
+        self.spin_offset_y = QSpinBox()
+        self.spin_offset_y.setRange(-2000, 2000)
+        self.spin_offset_y.setSingleStep(1)
+        self.spin_offset_y.valueChanged.connect(self._on_global_offset_y_changed)
+        offset_row.addWidget(self.spin_offset_y)
+        offset_row.addStretch(1)
         dpi_row = QHBoxLayout()
         dpi_row.addWidget(QLabel("스캔 DPI"))
         self.spin_dpi = QSpinBox()
@@ -491,8 +505,8 @@ class SettingsInterface(QWidget):
         dpi_row.addStretch(1)
         scan_layout.addWidget(self.chk_auto_retry)
         scan_layout.addWidget(self.chk_error_popup)
-        scan_layout.addWidget(self.chk_warp)
         scan_layout.addWidget(self.chk_auto_scale_dpi)
+        scan_layout.addLayout(offset_row)
         scan_layout.addLayout(dpi_row)
 
         # 디버그/로그
@@ -529,7 +543,7 @@ class SettingsInterface(QWidget):
 
         self.setStyleSheet(
             "#settingsTitle { font-size: 22px; font-weight: 600; }"
-            "QGroupBox { background: rgba(255, 255, 255, 0.92); border: 1px solid rgba(0,0,0,0.08);"
+            "QGroupBox { background: #FFFFFF; border: 1px solid #E1E7EE;"
             " border-radius: 12px; padding: 10px; }"
             "QGroupBox::title { subcontrol-origin: margin; left: 10px; top: -2px; padding: 0 6px; }"
         )
@@ -544,9 +558,10 @@ class SettingsInterface(QWidget):
 
         self.chk_auto_retry.setChecked(self._settings.value("scan/auto_retry", False, type=bool))
         self.chk_error_popup.setChecked(self._settings.value("scan/error_popups", True, type=bool))
-        self.chk_warp.setChecked(self._settings.value("scan/warp_enabled", True, type=bool))
         self.chk_auto_scale_dpi.setChecked(self._settings.value("scan/auto_scale_dpi", True, type=bool))
         self.spin_dpi.setValue(self._settings.value("scan/dpi", 150, type=int))
+        self.spin_offset_x.setValue(self._settings.value("scan/global_offset_x", 0, type=int))
+        self.spin_offset_y.setValue(self._settings.value("scan/global_offset_y", 0, type=int))
         self.chk_debug_save.setChecked(self._settings.value("debug/save_on_error", False, type=bool))
 
         log_level = self._settings.value("log/level", "INFO", type=str)
@@ -588,10 +603,6 @@ class SettingsInterface(QWidget):
         self._settings.setValue("scan/error_popups", checked)
         self.error_popup_changed.emit(checked)
 
-    def _on_warp_enabled_changed(self, checked: bool):
-        self._settings.setValue("scan/warp_enabled", checked)
-        self.warp_enabled_changed.emit(checked)
-
     def _on_auto_scale_dpi_changed(self, checked: bool):
         self._settings.setValue("scan/auto_scale_dpi", checked)
         self.auto_scale_dpi_changed.emit(checked)
@@ -599,6 +610,14 @@ class SettingsInterface(QWidget):
     def _on_dpi_changed(self, value: int):
         self._settings.setValue("scan/dpi", int(value))
         self.dpi_changed.emit(int(value))
+
+    def _on_global_offset_x_changed(self, value: int):
+        self._settings.setValue("scan/global_offset_x", int(value))
+        self.global_offset_x_changed.emit(int(value))
+
+    def _on_global_offset_y_changed(self, value: int):
+        self._settings.setValue("scan/global_offset_y", int(value))
+        self.global_offset_y_changed.emit(int(value))
 
     def _on_debug_save_changed(self, checked: bool):
         self._settings.setValue("debug/save_on_error", checked)
@@ -697,9 +716,10 @@ class OMRScannerApp(FluentWindow):
         self.settings_interface.auto_retry_changed.connect(self._apply_auto_retry)
         self.settings_interface.error_popup_changed.connect(self._apply_error_popups)
         self.settings_interface.debug_save_changed.connect(self._apply_debug_save)
-        self.settings_interface.warp_enabled_changed.connect(self._apply_warp_enabled)
         self.settings_interface.auto_scale_dpi_changed.connect(self._apply_auto_scale_dpi)
         self.settings_interface.dpi_changed.connect(self._apply_scan_dpi)
+        self.settings_interface.global_offset_x_changed.connect(self._apply_global_offset_x)
+        self.settings_interface.global_offset_y_changed.connect(self._apply_global_offset_y)
         self.settings_interface.log_level_changed.connect(self._apply_log_level)
 
     def open_file_setting(self):
@@ -750,12 +770,12 @@ class OMRScannerApp(FluentWindow):
     def open_env_menu(self, global_pos: QPoint):
         menu = QMenu(self)
         menu.setStyleSheet(
-            "QMenu { background: #FFFFFF; border: 1px solid rgba(0, 0, 0, 0.08);"
+            "QMenu { background: #FFFFFF; border: 1px solid #DDE3EA;"
             " border-radius: 12px; padding: 6px; }"
             "QMenu::item { padding: 8px 18px; margin: 2px 6px; border-radius: 8px; }"
-            "QMenu::item:selected { background: rgba(0, 120, 215, 0.12); }"
+            "QMenu::item:selected { background: #E6F0FF; }"
             "QMenu::item:disabled { color: #999; }"
-            "QMenu::separator { height: 1px; background: rgba(0, 0, 0, 0.06); margin: 6px 10px; }"
+            "QMenu::separator { height: 1px; background: #E9EDF2; margin: 6px 10px; }"
         )
 
         menu.addAction(_icon("DOCUMENT").icon(), "양식/좌표 설정", self.open_form_setting)
@@ -803,9 +823,10 @@ class OMRScannerApp(FluentWindow):
         self._apply_auto_retry(self._settings.value("scan/auto_retry", False, type=bool))
         self._apply_error_popups(self._settings.value("scan/error_popups", True, type=bool))
         self._apply_debug_save(self._settings.value("debug/save_on_error", False, type=bool))
-        self._apply_warp_enabled(self._settings.value("scan/warp_enabled", True, type=bool))
         self._apply_auto_scale_dpi(self._settings.value("scan/auto_scale_dpi", True, type=bool))
         self._apply_scan_dpi(self._settings.value("scan/dpi", 150, type=int))
+        self._apply_global_offset_x(self._settings.value("scan/global_offset_x", 0, type=int))
+        self._apply_global_offset_y(self._settings.value("scan/global_offset_y", 0, type=int))
         self._apply_log_level(self._settings.value("log/level", "INFO", type=str))
 
     def _apply_auto_retry(self, enabled: bool):
@@ -823,11 +844,6 @@ class OMRScannerApp(FluentWindow):
         if hasattr(view, "pipeline"):
             view.pipeline.set_debug_options(save_on_error=enabled)
 
-    def _apply_warp_enabled(self, enabled: bool):
-        view = self.scan_interface.scanner_view
-        if hasattr(view, "pipeline"):
-            view.pipeline.warp_enabled = bool(enabled)
-
     def _apply_auto_scale_dpi(self, enabled: bool):
         view = self.scan_interface.scanner_view
         if hasattr(view, "pipeline"):
@@ -837,6 +853,16 @@ class OMRScannerApp(FluentWindow):
         view = self.scan_interface.scanner_view
         if hasattr(view, "pipeline"):
             view.pipeline.set_dpi(int(value))
+
+    def _apply_global_offset_x(self, value: int):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.engine.configure(global_offset_x=int(value))
+
+    def _apply_global_offset_y(self, value: int):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.engine.configure(global_offset_y=int(value))
 
     def _apply_log_level(self, level: str):
         import logging

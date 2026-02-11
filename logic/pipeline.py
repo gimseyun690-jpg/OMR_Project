@@ -114,6 +114,11 @@ class ScanPipeline:
         if form_base_dpi <= 0: return 1.0
         return float(engine_base_dpi) / float(form_base_dpi)
 
+    def _is_new_marker_schema(self) -> bool:
+        if not isinstance(self.form_data, dict):
+            return False
+        return "fields" in self.form_data and "questions" in self.form_data and "layout_mode" not in self.form_data
+
     def _save_debug_if_needed(self, debug_img, image_path: str, reason: str):
         if not self.debug_save_on_error or debug_img is None:
             return
@@ -141,10 +146,10 @@ class ScanPipeline:
         # ScanPipeline은 "정렬해라" 명령만 내림. 실제 크기 조정(1240x1754)은 엔진 내부에서 수행됨.
         use_warp = self.warp_enabled if warp_enabled is None else bool(warp_enabled)
         if use_warp:
-            aligned_img, align_ok, align_reason = self.engine.align_image(img)
+            aligned_img, align_ok, align_reason = self.engine.align_image_warp(img)
         else:
-            # 워프 안 해도 엔진 표준 크기로 리사이즈는 필요할 수 있음 (Engine 로직에 의존)
-            aligned_img, align_ok, align_reason = self.engine.align_image(img) if img.shape[1] != 1240 else (img, True, "skip")
+            # 워프 안 해도 엔진 표준 크기로 리사이즈는 필요 (Engine 로직에 의존)
+            aligned_img, align_ok, align_reason = self.engine.align_image(img)
 
         if aligned_img is None:
              return self._create_error_result(read_num, place, room, image_path, f"정렬 실패({align_reason})"), None
@@ -163,20 +168,92 @@ class ScanPipeline:
 
             # [CASE A] JSON 폼이 선택된 경우
             if isinstance(self.form_data, dict):
-                sheet_code = self.form_manager.get_sheet_code()
+                sheet_code = self.form_data.get("form_name") or self.form_manager.get_sheet_code()
                 layout_mode = self.form_manager.get_layout_mode()
 
-                if layout_mode == "side_marker":
+                if self._is_new_marker_schema():
+                    questions = (
+                        self.engine.parse_config(self.form_data)
+                        if "question_groups" in self.form_data
+                        else self.form_data.get("questions", [])
+                    )
+                    question_layout = self.form_data.get("question_layout", {}) or {}
+                    marker_location = self.form_data.get("marker_location", "left")
+
+                    status, results, debug_img, error_reason = self.engine.analyze_marker_questions(
+                        aligned_img,
+                        questions,
+                        question_layout,
+                        scale=scale,
+                        marker_location=marker_location,
+                    )
+                    status_code = self._status_to_code(status)
+
+                elif layout_mode == "side_marker":
                     # [수정] FormManager 함수 대신, JSON 데이터에서 직접 꺼내기 (안전한 방법)
-                    questions = self.form_data.get("questions", [])
+                    questions = (
+                        self.engine.parse_config(self.form_data)
+                        if "question_groups" in self.form_data
+                        else self.form_data.get("questions", [])
+                    )
+                    # row_index 미지정 시 마커 순서대로 자동 매핑
+                    if questions:
+                        questions = [
+                            (q if isinstance(q, dict) else {"no": i + 1, "type": "vote"})
+                            for i, q in enumerate(questions)
+                        ]
+                        for i, q in enumerate(questions):
+                            if q.get("row_index") is None and q.get("y") is None:
+                                q["row_index"] = i
                     # roi_params 키를 가져오되 없으면 빈 딕셔너리
                     roi_params = self.form_data.get("roi_params", {}) 
+                    if not roi_params and isinstance(self.form_data.get("layout_defaults"), dict):
+                        roi_params = dict(self.form_data.get("layout_defaults", {}))
+                    marker_location = self.form_data.get("marker_location", "left")
                     
                     # 엔진 호출 (scale 인자 필수 전달!)
                     status, results, debug_img, error_reason = self.engine.analyze_side_marker_sheet(
-                        aligned_img, questions, roi_params, scale=scale
+                        aligned_img, questions, roi_params, scale=scale, marker_location=marker_location
                     )
                     status_code = self._status_to_code(status)
+
+                elif layout_mode == "timing_mark":
+                    timing_params = self.form_data.get("timing_mark", {}) if isinstance(self.form_data, dict) else {}
+                    left_ratio = float(timing_params.get("left_ratio", 0.08))
+                    x_offset_ratio = float(timing_params.get("x_offset_ratio", 0.3))
+                    box_w_ratio = float(timing_params.get("box_w_ratio", 0.04))
+                    box_h_ratio = float(timing_params.get("box_h_ratio", 0.02))
+                    pixel_ratio = float(timing_params.get("pixel_ratio", self.engine.pixel_threshold))
+
+                    aligned_img, rows, anchor_x, xs_list = self.engine.find_timing_marks_aligned(
+                        aligned_img, left_ratio=left_ratio
+                    )
+                    if not rows:
+                        status_code = "ERR"
+                        results = []
+                        debug_img = aligned_img.copy()
+                        error_reason = "TIMING_MARK"
+                    else:
+                        marks, debug_img = self.engine.read_answers(
+                            aligned_img,
+                            rows,
+                            anchor_x=anchor_x,
+                            x_offset_ratio=x_offset_ratio,
+                            box_w_ratio=box_w_ratio,
+                            box_h_ratio=box_h_ratio,
+                            pixel_threshold=pixel_ratio,
+                        )
+                        results = []
+                        has_error = False
+                        for i, marked in enumerate(marks):
+                            marked_indices = [0] if marked else []
+                            status = self.engine._determine_status(marked_indices)
+                            if status != "정상":
+                                has_error = True
+                            results.append({"q_num": i + 1, "marked": marked_indices, "status": status})
+                        if has_error and not error_reason:
+                            error_reason = "MARK"
+                        status_code = "ERR" if has_error else "OK"
 
                 else:
                     # 고정 좌표 모드
@@ -193,13 +270,12 @@ class ScanPipeline:
 
             # 4. 수험정보 판독 (옵션)
             if self.candidate_enabled and status_code == "OK": # 마킹 오류나면 수험번호 볼 필요 없음
-                # [개선] Engine으로 로직 이관
-                cand_config = self.form_data.get("candidate_fields") if isinstance(self.form_data, dict) else None
-                if cand_config:
-                     # Engine에 analyze_candidate_info 메서드 구현 필요
-                    c_ok, c_info, c_debug = self.engine.analyze_candidate_info(aligned_img, cand_config, scale)
+                if isinstance(self.form_data, dict) and "fields" in self.form_data:
+                    c_ok, c_info, c_debug = self.engine.analyze_custom_fields(
+                        aligned_img, self.form_data.get("fields", []), scale
+                    )
                     candidate_info = c_info
-                    
+
                     # 디버그 이미지 합치기 (옵션)
                     if c_debug is not None:
                         debug_img = cv2.addWeighted(debug_img, 0.7, c_debug, 0.3, 0)
@@ -207,6 +283,21 @@ class ScanPipeline:
                     if not c_ok:
                         status_code = "ERR"
                         error_reason = "CANDIDATE"
+                else:
+                    # [개선] Engine으로 로직 이관
+                    cand_config = self.form_data.get("candidate_fields") if isinstance(self.form_data, dict) else None
+                    if cand_config:
+                         # Engine에 analyze_candidate_info 메서드 구현 필요
+                        c_ok, c_info, c_debug = self.engine.analyze_candidate_info(aligned_img, cand_config, scale)
+                        candidate_info = c_info
+                        
+                        # 디버그 이미지 합치기 (옵션)
+                        if c_debug is not None:
+                            debug_img = cv2.addWeighted(debug_img, 0.7, c_debug, 0.3, 0)
+
+                        if not c_ok:
+                            status_code = "ERR"
+                            error_reason = "CANDIDATE"
 
         except Exception as e:
             print(f"Pipeline Error: {e}")
@@ -256,9 +347,12 @@ class ScanPipeline:
         s = ""
         for r in results:
             marked = r.get("marked", [])
-            if not marked: s += "0"
-            elif len(marked) > 1: s += "3" # 중복
-            else: s += str(marked[0] + 1) # 0번 인덱스 -> 1번 마킹
+            if not marked:
+                s += "0"
+            elif len(marked) > 1:
+                s += "X"  # 중복
+            else:
+                s += str(marked[0] + 1)  # 0번 인덱스 -> 1번 마킹
         return s
     
     def _create_error_result(self, read_num, place, room, path, msg):

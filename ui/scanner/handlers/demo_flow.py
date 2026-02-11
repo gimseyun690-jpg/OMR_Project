@@ -26,8 +26,7 @@ class DemoFlowMixin:
             QMessageBox.information(self, "알림", "선택한 폴더에 이미지가 없습니다.")
             return
 
-        # 이미지 불러오기 시작 시 다음 시험실로 이동
-        self._advance_room()
+        # 이미지 불러오기 시 현재 시험실 유지
 
         # UI 잠금
         self.control_panel.btn_scan.setEnabled(False)
@@ -90,7 +89,9 @@ class DemoFlowMixin:
         self.total_read = int(row_data[0])  # read_num 諛섏쁺
         self.current_session_count += 1
         if len(row_data) > 7 and hasattr(self.control_panel, "image_viewer"):
-            self.control_panel.image_viewer.set_image_path(row_data[7])
+            self.control_panel.image_viewer.set_image_path(
+                row_data[7], engine=getattr(self, "pipeline", None).engine if hasattr(self, "pipeline") else None, use_warp=True
+            )
         self.lbl_total.setText(str(self.total_read))
         self.lbl_cur_cnt.setText(str(self.current_session_count))
         self.control_panel.txt_temp.setText(str(self.total_read))

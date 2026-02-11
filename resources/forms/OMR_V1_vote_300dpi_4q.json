@@ -3,6 +3,7 @@
   "form_no": "OMR_V1_vote_300dpi_4q",
   "display_name": "OMR Vote 300dpi 4문항 (사이드마커)",
   "layout_mode": "side_marker",
+  "marker_location": "left", 
   "base_dpi": 300,
 
   "omr": {

@@ -45,6 +45,17 @@ def main():
     # 글씨가 너무 크면 10, 적당하면 11로 하세요
     font = QFont("Malgun Gothic", 10) 
     app.setFont(font)
+    app.setStyleSheet(
+        """
+        QAbstractScrollArea { background: #FFFFFF; color: #111111; }
+        QTabWidget::pane { border: 1px solid #E1E7EE; background: #FFFFFF; }
+        QTabBar::tab { background: #F7F9FC; color: #111111; padding: 6px 12px; border: 1px solid #E1E7EE; }
+        QTabBar::tab:selected { background: #FFFFFF; }
+        QTableWidget { background: #FFFFFF; color: #111111; gridline-color: #E5E7EB; }
+        QHeaderView::section { background: #F1F5F9; color: #111111; border: 1px solid #E1E7EE; }
+        QTableCornerButton::section { background: #F1F5F9; border: 1px solid #E1E7EE; }
+        """
+    )
 
     # 4. 메인 윈도우 생성 및 표시
     window = OMRScannerApp()
@@ -55,4 +66,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

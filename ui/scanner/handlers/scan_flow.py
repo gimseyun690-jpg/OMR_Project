@@ -99,7 +99,9 @@ class ScanFlowMixin:
         self.current_session_count += 1  # 현재 세션 카운트
 
         if hasattr(self.control_panel, "image_viewer"):
-            self.control_panel.image_viewer.set_image_path(image_path)
+            self.control_panel.image_viewer.set_image_path(
+                image_path, engine=getattr(self, "pipeline", None).engine if hasattr(self, "pipeline") else None, use_warp=True
+            )
 
         task = AnalyzeTask(
             controller=self.controller,

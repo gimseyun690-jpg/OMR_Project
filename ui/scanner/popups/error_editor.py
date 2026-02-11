@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import cv2
+import numpy as np
 from PySide2.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -19,6 +20,7 @@ from PySide2.QtWidgets import (
 )
 from PySide2.QtCore import Qt, Signal
 from PySide2.QtGui import QPixmap, QImage, QColor, QFont
+from logic.omr_engine import OMREngine
 
 
 class ErrorCorrectionDialog(QDialog):
@@ -50,6 +52,9 @@ class ErrorCorrectionDialog(QDialog):
         self._right_map = []
         self.zoom_factor = 1.0
         self._orig_pixmap = None
+        self._warp_pixmap = None
+        self._show_warped = True
+        self._engine = OMREngine()
 
         self.init_ui()
         self.connect_signals()  # 버튼 기능 연결
@@ -144,6 +149,21 @@ class ErrorCorrectionDialog(QDialog):
         v_save.addWidget(self.btn_save)
         top_layout.addWidget(card_save)
 
+        # (1-5) 보기 옵션
+        card_view = QFrame()
+        card_view.setObjectName("card")
+        card_view.setMinimumWidth(200)
+        v_view = QVBoxLayout(card_view)
+        v_view.setContentsMargins(12, 10, 12, 10)
+        v_view.setSpacing(6)
+        lbl_view_title = QLabel("보기 옵션")
+        lbl_view_title.setObjectName("cardTitle")
+        self.chk_show_warped = QCheckBox("정렬된 이미지 보기")
+        self.chk_show_warped.setChecked(True)
+        v_view.addWidget(lbl_view_title, 0, Qt.AlignLeft)
+        v_view.addWidget(self.chk_show_warped)
+        top_layout.addWidget(card_view)
+
         main_layout.addWidget(top_panel)
 
         # [2] 중앙 작업 영역
@@ -212,15 +232,15 @@ class ErrorCorrectionDialog(QDialog):
         self.setStyleSheet(
             """
             QDialog { background: #F7F9FC; }
-            #topPanel { background: transparent; }
+            #topPanel { background: #FFFFFF; }
             #card {
                 background: #FFFFFF;
-                border: 1px solid rgba(0, 0, 0, 0.08);
+                border: 1px solid #E1E7EE;
                 border-radius: 12px;
             }
             #cardPrimary {
                 background: #F0F6FF;
-                border: 1px solid rgba(37, 99, 235, 0.35);
+                border: 1px solid #8FB0F3;
                 border-radius: 12px;
             }
             #cardTitle { color: #5B6775; font-weight: 600; font-size: 12px; }
@@ -228,12 +248,12 @@ class ErrorCorrectionDialog(QDialog):
             #progressHint { color: #8B95A1; font-size: 11px; }
             QPushButton {
                 background: #FFFFFF;
-                border: 1px solid rgba(0, 0, 0, 0.12);
+                border: 1px solid #CBD5E1;
                 border-radius: 8px;
                 padding: 8px 12px;
                 font-weight: 600;
             }
-            QPushButton:hover { background: #F2F6FF; border-color: rgba(37, 99, 235, 0.4); }
+            QPushButton:hover { background: #F2F6FF; border-color: #8FB0F3; }
             QPushButton#primaryButton {
                 background: #2563EB;
                 color: #FFFFFF;
@@ -244,7 +264,7 @@ class ErrorCorrectionDialog(QDialog):
             #imageInfo { background: #111827; color: #E5E7EB; font-weight: 600; padding: 6px 10px; }
             #logPanel {
                 background: #FFFFFF;
-                border: 1px solid rgba(0, 0, 0, 0.08);
+                border: 1px solid #E1E7EE;
                 border-radius: 12px;
                 padding: 10px;
                 color: #B91C1C;
@@ -267,7 +287,7 @@ class ErrorCorrectionDialog(QDialog):
             }
             QTableWidget {
                 gridline-color: #E5E7EB; font-size: 13px; selection-background-color: #D1E8FF; selection-color: black;
-                background: #FFFFFF; border: 1px solid rgba(0,0,0,0.08); border-radius: 12px;
+                background: #FFFFFF; border: 1px solid #E1E7EE; border-radius: 12px;
             }
         """
         )
@@ -357,6 +377,7 @@ class ErrorCorrectionDialog(QDialog):
         self.btn_save.clicked.connect(self.save_and_close)
         self.btn_prev.clicked.connect(self.on_prev)
         self.btn_next.clicked.connect(self.on_next)
+        self.chk_show_warped.toggled.connect(self._on_toggle_warped)
 
         # 일괄 처리 버튼 연결
         self.btn_all_agree.clicked.connect(lambda: self.batch_process(0))  # 0: 찬성
@@ -555,37 +576,67 @@ class ErrorCorrectionDialog(QDialog):
         self.accept()  # 창 닫기
 
     def update_image(self):
-        if self.image_cv is None and self.image_path:
+        base_img = None
+        if self.image_path:
             try:
                 img_array = np.fromfile(self.image_path, np.uint8)
-                self.image_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            except Exception:
-                self.image_cv = None
+                base_img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            except Exception as e:
+                print(f"[ErrorCorrectionDialog] base image load failed: {e}")
+                base_img = None
 
-        if self.image_cv is not None:
+        if self.image_cv is not None or base_img is not None:
             try:
-                h, w, ch = self.image_cv.shape
-                bytes_per_line = ch * w
-                rgb_img = cv2.cvtColor(self.image_cv, cv2.COLOR_BGR2RGB)
-                q_img = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                self._orig_pixmap = QPixmap.fromImage(q_img)
+                if base_img is not None:
+                    self._orig_pixmap = self._cv_to_pixmap(base_img)
+
+                self._warp_pixmap = None
+                if self.image_cv is not None:
+                    # 전달받은 이미지는 디버그/정렬 이미지로 간주
+                    if self.image_cv.shape[:2] == (self._engine.height, self._engine.width):
+                        self._warp_pixmap = self._cv_to_pixmap(self.image_cv)
+                    else:
+                        aligned_img, ok, _ = self._engine.align_image_warp(self.image_cv)
+                        if ok and aligned_img is not None:
+                            self._warp_pixmap = self._cv_to_pixmap(aligned_img)
                 self._render_image()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ErrorCorrectionDialog] update_image failed: {e}")
+                self.lbl_log.setText("이미지 표시 중 오류가 발생했습니다.")
         else:
             self.lbl_log.setText("이미지 로드 실패: 경로를 확인해주세요.")
 
+    def _cv_to_pixmap(self, img_cv):
+        if img_cv is None:
+            return QPixmap()
+        if not hasattr(img_cv, "shape") or len(img_cv.shape) < 2:
+            return QPixmap()
+        h, w = img_cv.shape[:2]
+        if h <= 0 or w <= 0:
+            return QPixmap()
+        rgb_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
+        rgb_img = np.ascontiguousarray(rgb_img)
+        bytes_per_line = rgb_img.shape[1] * rgb_img.shape[2]
+        q_img = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        q_img = q_img.copy()  # detach from numpy buffer to avoid crash on dialog close
+        return QPixmap.fromImage(q_img)
+
     def _render_image(self):
-        if not self._orig_pixmap:
+        pixmap = self._get_active_pixmap()
+        if not pixmap:
             return
         viewport = self.image_scroll.viewport()
         target_h = viewport.height()
         if target_h <= 0:
             return
         scaled_h = max(1, int(target_h * self.zoom_factor))
-        scaled = self._orig_pixmap.scaledToHeight(scaled_h, Qt.SmoothTransformation)
-        self.lbl_image.setPixmap(scaled)
-        self._adjust_left_panel_width(scaled)
+        try:
+            scaled = pixmap.scaledToHeight(scaled_h, Qt.SmoothTransformation)
+            self.lbl_image.setPixmap(scaled)
+            self._adjust_left_panel_width(scaled)
+        except Exception as e:
+            print(f"[ErrorCorrectionDialog] render failed: {e}")
+            self.lbl_log.setText("이미지 렌더링 중 오류가 발생했습니다.")
 
     def _adjust_left_panel_width(self, pixmap: QPixmap):
         if not hasattr(self, "main_splitter") or pixmap.isNull():
@@ -607,6 +658,15 @@ class ErrorCorrectionDialog(QDialog):
     def resizeEvent(self, event):
         self._render_image()
         super().resizeEvent(event)
+
+    def _get_active_pixmap(self):
+        if self._show_warped and self._warp_pixmap is not None:
+            return self._warp_pixmap
+        return self._orig_pixmap
+
+    def _on_toggle_warped(self, checked):
+        self._show_warped = bool(checked)
+        self._render_image()
 
 
 class _ImageLabel(QLabel):
