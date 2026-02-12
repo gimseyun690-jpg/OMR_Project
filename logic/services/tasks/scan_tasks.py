@@ -65,6 +65,8 @@ class DemoWorker(QThread):
         self.room = room
         self.start_read_num = start_read_num
         self._cancel = False
+        self.first_error = ""
+        self.error_samples = []
 
     def cancel(self):
         self._cancel = True
@@ -92,6 +94,10 @@ class DemoWorker(QThread):
                 except Exception as e:
                     fail += 1
                     print(f"[DEMO] 실패: {path} -> {e}")
+                    if not self.first_error:
+                        self.first_error = str(e)
+                    if len(self.error_samples) < 5:
+                        self.error_samples.append(f"{os.path.basename(path)}: {e}")
             self.finished.emit(ok, fail)
         except Exception as e:
             self.error.emit(str(e))

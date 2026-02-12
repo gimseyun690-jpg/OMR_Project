@@ -15,6 +15,7 @@ class FileSettingsDialog(QDialog):
         self.resize(800, 500)
         self.db = DBManager() # DB 매니저 연결
         self.init_ui()
+        self.apply_white_mode()
         self.load_list()
 
     def init_ui(self):
@@ -22,10 +23,12 @@ class FileSettingsDialog(QDialog):
 
         # 1. 파일 목록 테이블
         self.table = QTableWidget()
+        self.table.setObjectName("dbFileTable")
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["파일명", "제목", "경로", "생성일"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectRows) # 줄 단위 선택
+        self.table.setAlternatingRowColors(True)
         layout.addWidget(self.table)
 
         # 2. 버튼 영역
@@ -50,6 +53,50 @@ class FileSettingsDialog(QDialog):
         
         layout.addLayout(btn_layout)
         self.setLayout(layout)
+
+    def apply_white_mode(self):
+        self.setObjectName("fileSettingsDialog")
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(
+            """
+            #fileSettingsDialog {
+                background-color: #FFFFFF;
+                color: #000000;
+            }
+            #fileSettingsDialog QWidget {
+                background-color: #FFFFFF;
+                color: #000000;
+            }
+            #dbFileTable {
+                background-color: #FFFFFF;
+                alternate-background-color: #F8FAFC;
+                color: #111111;
+                gridline-color: #DDE3EA;
+                border: 1px solid #DDE3EA;
+            }
+            #dbFileTable::item {
+                background-color: #FFFFFF;
+                color: #111111;
+            }
+            #dbFileTable::item:selected {
+                background-color: #DCEBFF;
+                color: #000000;
+            }
+            #fileSettingsDialog QHeaderView::section {
+                background-color: #F1F5F9;
+                color: #111111;
+                border: 1px solid #DDE3EA;
+                padding: 4px;
+                font-weight: bold;
+            }
+            #fileSettingsDialog QTableCornerButton::section {
+                background-color: #F1F5F9;
+                border: 1px solid #DDE3EA;
+            }
+            """
+        )
 
     def load_list(self):
         """DB에서 목록 가져와서 테이블에 뿌리기"""

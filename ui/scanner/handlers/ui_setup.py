@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 from PySide2.QtCore import Qt
-from PySide2.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
+from PySide2.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel,
                                QFrame, QGroupBox, QComboBox, QSplitter, QPushButton,
                                QHeaderView, QAbstractItemView, QMessageBox, QTableWidgetItem,
                                QFileDialog, QCheckBox, QMenu, QInputDialog)
@@ -59,8 +59,16 @@ class UiSetupMixin:
         splitter.addWidget(self.summary_widget)
         splitter.addWidget(self.grid_widget)
         splitter.addWidget(self.control_panel)
-        splitter.setSizes([200, 1200, 260])
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 12)
+        splitter.setStretchFactor(2, 2)
+        splitter.setSizes([200, 1400, 230])
         splitter.setCollapsible(2, False)
+
+        if self._is_compact_layout():
+            self.status_panel.apply_compact_mode()
+            self.control_panel.apply_compact_mode()
+            splitter.setSizes([170, 1450, 210])
 
         main_layout.addWidget(splitter, 1)
         self.setLayout(main_layout)
@@ -80,6 +88,7 @@ class UiSetupMixin:
         self.control_panel.btn_next.clicked.connect(self.scan_next_room)
         self.control_panel.btn_stop.clicked.connect(self.stop_scan)
         self.control_panel.btn_retry.clicked.connect(self.retry_last_scan)
+        self.control_panel.btn_temp_reset.clicked.connect(self.reset_temp_count)
 
         
         # [추가] 콤보박스 변경 시 상단 라벨 자동 업데이트
@@ -97,6 +106,23 @@ class UiSetupMixin:
 
     def go_back_home(self):
         self.closed_signal.emit()
+
+    def _is_compact_layout(self) -> bool:
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return False
+        rect = screen.availableGeometry()
+        return rect.width() <= 1600 or rect.height() <= 920
+
+    def reset_temp_count(self):
+        prev = self.control_panel.txt_temp.text().strip()
+        self.control_panel.txt_temp.setText("0")
+        if not prev:
+            return
+        if hasattr(self.control_panel, "txt_prev"):
+            old = self.control_panel.txt_prev.text().strip()
+            merged = f"{prev}, {old}" if old else prev
+            self.control_panel.txt_prev.setText(merged[:120])
 
     def showEvent(self, event):
         super().showEvent(event)

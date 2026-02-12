@@ -1,4 +1,5 @@
-﻿import os
+import os
+from importlib import import_module
 from PySide2.QtCore import Qt, Signal, QPoint, QPointF, QSettings, QPropertyAnimation, QEasingCurve
 from PySide2.QtWidgets import (
     QApplication,
@@ -34,14 +35,6 @@ from ui.scanner.scan_window import ScannerReadingView
 from ui.results.vote_count import VoteCountView
 from ui.results.scan_data import ScanDataView
 from ui.results.scan_stats import ScanStatsView
-from ui.results.roster_input import RosterInputView
-from ui.results.answer_input import AnswerInputView
-from ui.results.unread_check import UnreadCheckView
-from ui.results.scoring_calc import ScoringCalcView
-from ui.results.scoring_result import ScoringResultView
-from ui.results.site_status import SiteStatusView
-from ui.results.type_status import TypeStatusView
-from ui.results.item_analysis import ItemAnalysisView
 
 # 설정 창들
 from ui.settings.form_setting import FormSettingsDialog
@@ -62,6 +55,12 @@ def _icon_pixmap(icon, size=40):
         icon = icon.icon()
     return icon.pixmap(size, size)
 
+def _load_view_class(module_path: str, class_name: str):
+    try:
+        module = import_module(module_path)
+    except ModuleNotFoundError:
+        return None
+    return getattr(module, class_name, None)
 
 class HomeCard(QWidget):
     clicked = Signal()
@@ -312,23 +311,27 @@ class ResultsExamInterface(QWidget):
         self.vote_view = VoteCountView()
         self.data_view = ScanDataView()
         self.stats_view = ScanStatsView()
-        self.roster_view = RosterInputView()
-        self.answer_view = AnswerInputView()
-        self.unread_view = UnreadCheckView()
-        self.scoring_view = ScoringCalcView()
-        self.scoring_result_view = ScoringResultView()
-        self.site_status_view = SiteStatusView()
-        self.type_status_view = TypeStatusView()
-        self.item_analysis_view = ItemAnalysisView()
+        self.tabs.addTab(self.vote_view, "개표 결과")
+        self.tabs.addTab(self.data_view, "판독 자료")
+        self.tabs.addTab(self.stats_view, "판독 매수")
 
-        self.tabs.addTab(self.roster_view, "명단 입력")
-        self.tabs.addTab(self.answer_view, "정답 입력")
-        self.tabs.addTab(self.unread_view, "미판독 확인")
-        self.tabs.addTab(self.scoring_view, "채점 계산")
-        self.tabs.addTab(self.scoring_result_view, "채점 결과")
-        self.tabs.addTab(self.site_status_view, "고사장 현황")
-        self.tabs.addTab(self.type_status_view, "전형별 현황")
-        self.tabs.addTab(self.item_analysis_view, "문항 분석")
+        optional_tabs = [
+            ("ui.results.roster_input", "RosterInputView", "명단 입력", "roster_view"),
+            ("ui.results.answer_input", "AnswerInputView", "정답 입력", "answer_view"),
+            ("ui.results.unread_check", "UnreadCheckView", "미판독 확인", "unread_view"),
+            ("ui.results.scoring_calc", "ScoringCalcView", "채점 계산", "scoring_view"),
+            ("ui.results.scoring_result", "ScoringResultView", "채점 결과", "scoring_result_view"),
+            ("ui.results.site_status", "SiteStatusView", "고사장 현황", "site_status_view"),
+            ("ui.results.type_status", "TypeStatusView", "전형별 현황", "type_status_view"),
+            ("ui.results.item_analysis", "ItemAnalysisView", "문항 분석", "item_analysis_view"),
+        ]
+        for module_path, class_name, tab_name, attr_name in optional_tabs:
+            view_cls = _load_view_class(module_path, class_name)
+            if view_cls is None:
+                continue
+            view = view_cls()
+            setattr(self, attr_name, view)
+            self.tabs.addTab(view, tab_name)
 
         root.addWidget(title)
         root.addWidget(self.tabs, 1)
@@ -336,18 +339,22 @@ class ResultsExamInterface(QWidget):
         self.setStyleSheet("#resultsTitle { font-size: 22px; font-weight: 600; }")
 
     def set_db_path(self, db_path):
-        self.vote_view.set_db_path(db_path)
-        self.data_view.set_db_path(db_path)
-        self.stats_view.set_db_path(db_path)
-        self.roster_view.set_db_path(db_path)
-        self.answer_view.set_db_path(db_path)
-        self.unread_view.set_db_path(db_path)
-        self.scoring_view.set_db_path(db_path)
-        self.scoring_result_view.set_db_path(db_path)
-        self.site_status_view.set_db_path(db_path)
-        self.type_status_view.set_db_path(db_path)
-        self.item_analysis_view.set_db_path(db_path)
-
+        for attr in (
+            "vote_view",
+            "data_view",
+            "stats_view",
+            "roster_view",
+            "answer_view",
+            "unread_view",
+            "scoring_view",
+            "scoring_result_view",
+            "site_status_view",
+            "type_status_view",
+            "item_analysis_view",
+        ):
+            view = getattr(self, attr, None)
+            if view is not None and hasattr(view, "set_db_path"):
+                view.set_db_path(db_path)
 
 class ResultsChurchInterface(QWidget):
     def __init__(self, parent=None):
@@ -456,6 +463,9 @@ class SettingsInterface(QWidget):
         theme_layout = QVBoxLayout(theme_group)
         self.chk_dark = QCheckBox("다크 모드")
         self.chk_dark.toggled.connect(self._on_toggle_dark)
+        self.chk_dark.setChecked(False)
+        self.chk_dark.setEnabled(False)
+        self.chk_dark.setToolTip("Global White Mode가 활성화되어 다크 모드를 사용할 수 없습니다.")
         theme_layout.addWidget(self.chk_dark)
 
         # 글자 크기
@@ -550,7 +560,8 @@ class SettingsInterface(QWidget):
 
     def _load_settings(self):
         self.chk_auto_open.setChecked(self._settings.value("startup/auto_open", False, type=bool))
-        self.chk_dark.setChecked(self._settings.value("theme/dark", False, type=bool))
+        self._settings.setValue("theme/dark", False)
+        self.chk_dark.setChecked(False)
 
         font_size = self._settings.value("font/size", 10, type=int)
         self.slider_font.setValue(font_size)
@@ -580,10 +591,14 @@ class SettingsInterface(QWidget):
 
     def _on_toggle_dark(self, checked: bool):
         try:
-            setTheme(Theme.DARK if checked else Theme.LIGHT)
+            setTheme(Theme.LIGHT)
         except Exception:
             pass
-        self._settings.setValue("theme/dark", checked)
+        if checked:
+            self.chk_dark.blockSignals(True)
+            self.chk_dark.setChecked(False)
+            self.chk_dark.blockSignals(False)
+        self._settings.setValue("theme/dark", False)
 
     def _on_font_size_changed(self, size: int):
         self.lbl_font.setText(f"기본: {size}")
@@ -635,6 +650,17 @@ class SettingsInterface(QWidget):
 class OMRScannerApp(FluentWindow):
     def __init__(self):
         super().__init__()
+        try:
+            self.setMicaEffectEnabled(False)
+        except Exception:
+            pass
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setStyleSheet(
+            "FluentWindow, QMainWindow, QFrame, QStackedWidget, QWidget {"
+            " background-color: #FFFFFF; }"
+        )
         self.setWindowTitle("OMR_PRO")
         self.resize(1280, 800)
 
@@ -713,6 +739,7 @@ class OMRScannerApp(FluentWindow):
         self.home_interface.open_exam_results.connect(self._on_home_select_exam)
         self.home_interface.open_church_results.connect(self._on_home_select_church)
         self.home_interface.open_rebuild_results.connect(self._on_home_select_rebuild)
+        self.scan_interface.scanner_view.closed_signal.connect(self._return_home_from_scan)
         self.settings_interface.auto_retry_changed.connect(self._apply_auto_retry)
         self.settings_interface.error_popup_changed.connect(self._apply_error_popups)
         self.settings_interface.debug_save_changed.connect(self._apply_debug_save)
@@ -805,6 +832,10 @@ class OMRScannerApp(FluentWindow):
             self._set_nav_item_enabled(route_key, True)
 
     def _on_home_nav_clicked(self):
+        self.switchTo(self.home_interface)
+
+    def _return_home_from_scan(self):
+        self._unlock_navigation()
         self.switchTo(self.home_interface)
 
     def _on_home_select_exam(self):

@@ -24,11 +24,11 @@ class ScannerStatusPanel(QWidget):
         self._init_ui()
 
     def _init_ui(self):
-        top_frame = QFrame()
-        top_frame.setFixedHeight(140)
-        top_frame.setStyleSheet("background-color: #F0F0F0; border-bottom: 1px solid #A0A0A0;")
+        self.top_frame = QFrame()
+        self.top_frame.setFixedHeight(140)
+        self.top_frame.setStyleSheet("background-color: #F0F0F0; border-bottom: 1px solid #A0A0A0;")
 
-        top_layout = QHBoxLayout(top_frame)
+        top_layout = QHBoxLayout(self.top_frame)
         top_layout.setContentsMargins(5, 5, 5, 5)
         top_layout.setSpacing(10)
 
@@ -146,4 +146,7 @@ class ScannerStatusPanel(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(top_frame)
+        layout.addWidget(self.top_frame)
+
+    def apply_compact_mode(self):
+        self.top_frame.setFixedHeight(118)

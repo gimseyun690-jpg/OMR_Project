@@ -4,4 +4,4 @@ opencv-python
 numpy
 Pillow
 matplotlib
-PySide2-Fluent-Widgets[full]
+PySide2-Fluent-Widgets

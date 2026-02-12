@@ -14,6 +14,11 @@ class DemoFlowMixin:
         if self.current_db_path is None:
             QMessageBox.warning(self, "경고", "먼저 DB파일을 선택(파일 설정)해주세요.")
             return
+        form_path = self.cb_form.currentData() if hasattr(self, "cb_form") else None
+        if not form_path:
+            QMessageBox.warning(self, "경고", "스캔할 OMR 양식을 먼저 선택해주세요.")
+            return
+        self.pipeline.set_form_path(form_path)
         folder = QFileDialog.getExistingDirectory(self, "이미지 폴더 선택")
         if not folder:
             return
@@ -120,7 +125,30 @@ class DemoFlowMixin:
         self._upsert_summary_count(place, room, int(count))
         self.reload_grid_from_db(place=place, room=room)
 
-        QMessageBox.information(self, "이미지 불러오기 완료", f"성공 {ok} / 실패 {fail}")
+        fail_samples = []
+        if hasattr(self, "demo_worker") and getattr(self.demo_worker, "error_samples", None):
+            fail_samples = self.demo_worker.error_samples[:3]
+
+        if ok == 0 and fail > 0:
+            detail = "\n".join(fail_samples)
+            first_error = getattr(self.demo_worker, "first_error", "") if hasattr(self, "demo_worker") else ""
+            msg = f"이미지 판독에 모두 실패했습니다. (성공 {ok} / 실패 {fail})"
+            if first_error:
+                msg += f"\n\n원인: {first_error}"
+            if detail:
+                msg += f"\n\n실패 예시:\n{detail}"
+            self._set_last_error_message(first_error or "이미지 판독 실패")
+            self._show_error_popup("이미지 불러오기 실패", msg, critical=True)
+            return
+
+        if fail > 0 and fail_samples:
+            QMessageBox.warning(
+                self,
+                "이미지 불러오기 완료(일부 실패)",
+                f"성공 {ok} / 실패 {fail}\n\n실패 예시:\n" + "\n".join(fail_samples),
+            )
+        else:
+            QMessageBox.information(self, "이미지 불러오기 완료", f"성공 {ok} / 실패 {fail}")
 
     def _on_demo_error(self, msg):
         if hasattr(self, "demo_progress") and self.demo_progress:

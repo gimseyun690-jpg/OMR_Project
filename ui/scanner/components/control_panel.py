@@ -98,6 +98,14 @@ class ControlPanel(QWidget):
         self.btn_stop = HoverShadowButton("⏹ 스캔중단/종료(E)"); self.btn_stop.setStyleSheet(style_red)
         self.btn_retry = HoverShadowButton("↻ 재시도(T)"); self.btn_retry.setStyleSheet(style_blue)
         self.btn_retry.setEnabled(False)
+        self._main_buttons = [
+            self.btn_scan,
+            self.btn_check,
+            self.btn_next,
+            self.btn_demo,
+            self.btn_stop,
+            self.btn_retry,
+        ]
 
         
         layout.addWidget(self.btn_scan)
@@ -148,12 +156,12 @@ class ControlPanel(QWidget):
         h_input.addWidget(self.txt_temp)
         v_temp.addLayout(h_input)
         
-        btn_reset = HoverShadowButton("🗑️ 임시판독매수 초기화(I)")
-        btn_reset.setStyleSheet("""
+        self.btn_temp_reset = HoverShadowButton("🗑️ 임시판독매수 초기화(I)")
+        self.btn_temp_reset.setStyleSheet("""
             background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #E3F2FD, stop:1 #90CAF9);
             border: 1px solid #64B5F6; border-radius: 3px; font-weight: bold;
         """)
-        v_temp.addWidget(btn_reset)
+        v_temp.addWidget(self.btn_temp_reset)
         layout.addWidget(grp_temp)
 
         # ----------------------------------------------------
@@ -164,9 +172,9 @@ class ControlPanel(QWidget):
         grp_prev.setMinimumHeight(70)
         v_prev = QVBoxLayout(grp_prev)
         v_prev.setContentsMargins(5, 5, 5, 5)
-        txt_prev = QLineEdit()
-        txt_prev.setReadOnly(True)
-        v_prev.addWidget(txt_prev)
+        self.txt_prev = QLineEdit()
+        self.txt_prev.setReadOnly(True)
+        v_prev.addWidget(self.txt_prev)
         layout.addWidget(grp_prev)
 
         # ----------------------------------------------------
@@ -185,4 +193,15 @@ class ControlPanel(QWidget):
         layout.addLayout(h_preview)
 
         self.setLayout(layout)
+
+    def apply_compact_mode(self):
+        self.setMinimumWidth(205)
+        self.setMaximumWidth(230)
+        self.layout().setContentsMargins(4, 4, 4, 4)
+        self.layout().setSpacing(6)
+        for button in self._main_buttons:
+            button.setMinimumHeight(30)
+            button.setStyleSheet(button.styleSheet() + "QPushButton { font-size: 12px; }")
+        self.btn_temp_reset.setMinimumHeight(28)
+        self.image_viewer.lbl.setFixedSize(170, 180)
 

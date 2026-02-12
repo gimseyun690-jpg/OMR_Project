@@ -1,6 +1,9 @@
 ﻿import cv2
 import numpy as np
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 class OMREngine:
     
@@ -204,31 +207,134 @@ class OMREngine:
             candidates = []
             min_area = rw * rh * 0.0001
             max_area = rw * rh * 0.01
+            rejected_area = 0
+            rejected_aspect = 0
+            rejected_solidity = 0
+            rejected_fill = 0
 
             for cnt in contours:
                 area = cv2.contourArea(cnt)
                 if area < min_area or area > max_area:
+                    rejected_area += 1
                     continue
 
-                x, y, w, h = cv2.boundingRect(cnt)
-                x += rx
-                y += ry
+                lx, ly, w, h = cv2.boundingRect(cnt)
+                x = lx + rx
+                y = ly + ry
 
                 ratio_wh = float(w) / h if h > 0 else 0.0
                 if not (0.5 <= ratio_wh <= 2.0):
+                    rejected_aspect += 1
                     continue
 
                 hull = cv2.convexHull(cnt)
                 hull_area = cv2.contourArea(hull)
                 if hull_area == 0:
+                    rejected_solidity += 1
                     continue
                 solidity = float(area) / hull_area
-                if solidity < 0.8:
+                if solidity < 0.90:
+                    rejected_solidity += 1
                     continue
 
-                candidates.append({"cx": x + w // 2, "cy": y + h // 2, "x": x, "y": y})
+                # In inverted binary image, a solid mark should occupy most pixels in bbox.
+                box = binary[ly:ly + h, lx:lx + w]
+                if box is None or box.size == 0:
+                    rejected_fill += 1
+                    continue
+                fill_ratio = float(cv2.countNonZero(box)) / float(box.size)
+                if fill_ratio < 0.70:
+                    rejected_fill += 1
+                    continue
+
+                candidates.append(
+                    {"cx": x + w // 2, "cy": y + h // 2, "x": x, "y": y, "w": w, "h": h}
+                )
+
+            logger.debug(
+                "[MarkerDetect] loc=%s ratio=%.2f contours=%d kept=%d rej_area=%d rej_aspect=%d rej_solidity=%d rej_fill=%d",
+                loc,
+                ratio,
+                len(contours),
+                len(candidates),
+                rejected_area,
+                rejected_aspect,
+                rejected_solidity,
+                rejected_fill,
+            )
 
             return candidates
+
+        def _filter_group_consistency(group):
+            """
+            Keep only uniformly-sized solid marks.
+            - Remove items deviating >20% from median width/height.
+            - Reject whole group when size standard deviation is too high.
+            """
+            if not group:
+                return []
+            if len(group) < 2:
+                return group
+
+            ws = np.asarray([max(1, int(c.get("w", 1))) for c in group], dtype=np.float32)
+            hs = np.asarray([max(1, int(c.get("h", 1))) for c in group], dtype=np.float32)
+            med_w = float(np.median(ws))
+            med_h = float(np.median(hs))
+            if med_w <= 0 or med_h <= 0:
+                return []
+
+            kept = []
+            for c in group:
+                w = float(max(1, int(c.get("w", 1))))
+                h = float(max(1, int(c.get("h", 1))))
+                if abs(w - med_w) / med_w > 0.20:
+                    continue
+                if abs(h - med_h) / med_h > 0.20:
+                    continue
+                kept.append(c)
+
+            if len(kept) < 2:
+                return []
+
+            kept_ws = np.asarray([max(1, int(c.get("w", 1))) for c in kept], dtype=np.float32)
+            kept_hs = np.asarray([max(1, int(c.get("h", 1))) for c in kept], dtype=np.float32)
+            med_kw = float(np.median(kept_ws))
+            med_kh = float(np.median(kept_hs))
+            if med_kw <= 0 or med_kh <= 0:
+                return []
+
+            rel_std_w = float(np.std(kept_ws)) / med_kw
+            rel_std_h = float(np.std(kept_hs)) / med_kh
+            if rel_std_w > 0.20 or rel_std_h > 0.20:
+                return []
+
+            return kept
+
+        def _validate_axis_spacing(group, axis_key):
+            """
+            Reject groups that are too random on the primary axis.
+            """
+            if not group or len(group) < 3:
+                return False if not group else True
+            coords = sorted([int(c.get(axis_key, 0)) for c in group])
+            gaps = np.diff(np.asarray(coords, dtype=np.float32))
+            if gaps.size == 0:
+                return True
+            median_gap = float(np.median(gaps))
+            if median_gap <= 1e-6:
+                return False
+            rel_std_gap = float(np.std(gaps)) / median_gap
+            return rel_std_gap <= 0.45
+
+        def _required_span_ratio(group_len):
+            """
+            4문항처럼 마커 개수가 적은 용지도 통과하도록 동적 기준 적용.
+            """
+            if group_len <= 4:
+                return 0.20
+            if group_len <= 6:
+                return 0.24
+            return 0.30
 
         try:
             if image is None:
@@ -239,6 +345,7 @@ class OMREngine:
             if not candidates:
                 candidates = _detect_in_roi(image, loc, 0.20)
             if not candidates:
+                logger.info("[MarkerDetect] loc=%s min_count=%d -> no candidates", loc, int(min_count))
                 return []
 
             if loc in ("top", "bottom"):
@@ -253,6 +360,7 @@ class OMREngine:
                         current_group = [candidates[i]]
                 groups.append(current_group)
 
+                groups = [_filter_group_consistency(g) for g in groups]
                 groups = [g for g in groups if len(g) >= int(min_count)]
                 if not groups:
                     return []
@@ -264,8 +372,24 @@ class OMREngine:
 
                 best_group.sort(key=lambda c: c["cx"])
                 span_x = max(c["cx"] for c in best_group) - min(c["cx"] for c in best_group)
-                if span_x < (image.shape[1] * 0.3):
+                if span_x < (image.shape[1] * _required_span_ratio(len(best_group))):
+                    logger.debug(
+                        "[MarkerDetect] loc=%s group_reject=span span=%.1f required=%.1f len=%d",
+                        loc,
+                        float(span_x),
+                        float(image.shape[1] * _required_span_ratio(len(best_group))),
+                        len(best_group),
+                    )
                     return []
+                if not _validate_axis_spacing(best_group, "cx"):
+                    logger.debug("[MarkerDetect] loc=%s group_reject=axis_spacing len=%d", loc, len(best_group))
+                    return []
+                logger.info(
+                    "[MarkerDetect] loc=%s selected=%d span_x=%.1f",
+                    loc,
+                    len(best_group),
+                    float(span_x),
+                )
                 return best_group
 
             candidates.sort(key=lambda c: c["x"])
@@ -279,6 +403,7 @@ class OMREngine:
                     current_group = [candidates[i]]
             groups.append(current_group)
 
+            groups = [_filter_group_consistency(g) for g in groups]
             groups = [g for g in groups if len(g) >= int(min_count)]
             if not groups:
                 return []
@@ -290,17 +415,144 @@ class OMREngine:
 
             best_group.sort(key=lambda c: c["cy"])
             span_y = max(c["cy"] for c in best_group) - min(c["cy"] for c in best_group)
-            if span_y < (image.shape[0] * 0.3):
+            if span_y < (image.shape[0] * _required_span_ratio(len(best_group))):
+                logger.debug(
+                    "[MarkerDetect] loc=%s group_reject=span span=%.1f required=%.1f len=%d",
+                    loc,
+                    float(span_y),
+                    float(image.shape[0] * _required_span_ratio(len(best_group))),
+                    len(best_group),
+                )
                 return []
+            if not _validate_axis_spacing(best_group, "cy"):
+                logger.debug("[MarkerDetect] loc=%s group_reject=axis_spacing len=%d", loc, len(best_group))
+                return []
+            logger.info(
+                "[MarkerDetect] loc=%s selected=%d span_y=%.1f",
+                loc,
+                len(best_group),
+                float(span_y),
+            )
             return best_group
 
         except Exception as e:
-            print(f"[ERROR] Find Markers: {e}")
+            logger.exception("[MarkerDetect] exception: %s", e)
             return []
 
     def find_side_markers(self, image):
         """호환용 래퍼 (left 고정)"""
         return self.find_markers(image, location="left", min_count=3)
+
+    def normalize_orientation(self, image, expected_location="left", min_count=3):
+        """
+        Normalize sheet orientation so that detected timing markers end up on expected_location.
+
+        Returns:
+            (rotated_image, markers_on_expected_side)
+        """
+        if image is None:
+            return None, []
+
+        target_loc = str(expected_location or "left").strip().lower()
+        if target_loc not in ("left", "right", "top", "bottom"):
+            target_loc = "left"
+
+        directions = ("left", "right", "top", "bottom")
+
+        def _rotate_quarter_turns(src, k_cw):
+            k = int(k_cw) % 4
+            if k == 0:
+                return src
+            if k == 1:
+                return cv2.rotate(src, cv2.ROTATE_90_CLOCKWISE)
+            if k == 2:
+                return cv2.rotate(src, cv2.ROTATE_180)
+            return cv2.rotate(src, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+        # 1) Detect markers on all 4 sides in the original image.
+        side_markers = {loc: self.find_markers(image, location=loc, min_count=min_count) for loc in directions}
+        side_counts = {loc: len(side_markers.get(loc, [])) for loc in directions}
+        best_count = max(side_counts.values()) if side_counts else 0
+        logger.info(
+            "[Orientation] target=%s min_count=%d side_counts=%s best=%d",
+            target_loc,
+            int(min_count),
+            side_counts,
+            int(best_count),
+        )
+
+        # No reliable markers at all -> fallback by testing target side after each rotation.
+        if best_count <= 0:
+            best_img = image
+            best_markers = []
+            best_target_count = 0
+            best_k = 0
+            for k in (0, 1, 2, 3):
+                rotated = _rotate_quarter_turns(image, k)
+                markers = self.find_markers(rotated, location=target_loc, min_count=min_count)
+                count = len(markers)
+                if count > best_target_count:
+                    best_target_count = count
+                    best_img = rotated
+                    best_markers = markers
+                    best_k = k
+            logger.info(
+                "[Orientation] fallback(no_side) selected_k_cw=%d target=%s markers=%d",
+                int(best_k),
+                target_loc,
+                int(best_target_count),
+            )
+            return best_img, best_markers
+
+        # 2) Pick current marker side.
+        # If expected side is tied for best, keep current orientation for stability.
+        if side_counts.get(target_loc, 0) == best_count:
+            current_loc = target_loc
+        else:
+            current_loc = max(directions, key=lambda loc: side_counts.get(loc, 0))
+
+        # 3) Compute rotation (clockwise quarter-turns) so current_loc -> target_loc.
+        # CW side order mapping: top -> right -> bottom -> left -> top
+        cw_order = ["top", "right", "bottom", "left"]
+        cur_idx = cw_order.index(current_loc)
+        tgt_idx = cw_order.index(target_loc)
+        k_cw = (tgt_idx - cur_idx) % 4
+        logger.info(
+            "[Orientation] current=%s target=%s rotate_k_cw=%d",
+            current_loc,
+            target_loc,
+            int(k_cw),
+        )
+
+        rotated = _rotate_quarter_turns(image, k_cw)
+        markers = self.find_markers(rotated, location=target_loc, min_count=min_count)
+        logger.info("[Orientation] post_rotate target=%s markers=%d", target_loc, int(len(markers)))
+
+        # 4) Robust fallback:
+        # If rotation result is weak, choose the rotation that maximizes target-side markers.
+        if len(markers) <= 0:
+            best_img = rotated
+            best_markers = markers
+            best_target_count = 0
+            best_k = k_cw
+            for k in (0, 1, 2, 3):
+                trial = _rotate_quarter_turns(image, k)
+                trial_markers = self.find_markers(trial, location=target_loc, min_count=min_count)
+                count = len(trial_markers)
+                if count > best_target_count:
+                    best_target_count = count
+                    best_img = trial
+                    best_markers = trial_markers
+                    best_k = k
+            logger.info(
+                "[Orientation] fallback(post_rotate_fail) selected_k_cw=%d target=%s markers=%d",
+                int(best_k),
+                target_loc,
+                int(best_target_count),
+            )
+            return best_img, best_markers
+
+        return rotated, markers
 
     def ensure_gross_rotation(self, original_img):
         """
@@ -748,14 +1000,26 @@ class OMREngine:
         """
         if original_img is None: return "ERROR", [], None, "IMG_NONE"
 
-        rotated_img, markers = self.ensure_correct_orientation(original_img, expected_location=marker_location)
+        min_marker_count = max(3, min(4, len(questions) if questions else 3))
+        logger.info(
+            "[SideMarker] start marker_location=%s questions=%d min_marker_count=%d",
+            str(marker_location),
+            len(questions) if questions else 0,
+            int(min_marker_count),
+        )
+        rotated_img, markers = self.normalize_orientation(
+            original_img,
+            expected_location=marker_location,
+            min_count=min_marker_count,
+        )
         if rotated_img is None:
             return "ERR", [], None, "IMG_NONE"
 
         base_img = rotated_img
 
         # Fine-tuning (skew correction) using markers
-        markers = self.find_markers(base_img, location=marker_location, min_count=3)
+        markers = self.find_markers(base_img, location=marker_location, min_count=min_marker_count)
+        logger.info("[SideMarker] markers_after_normalize=%d", len(markers))
         if markers and len(markers) >= 5:
             if str(marker_location).strip().lower() in ("top", "bottom"):
                 rows = [m["cx"] for m in markers]
@@ -767,17 +1031,25 @@ class OMREngine:
             corrected = self.correct_rotation_by_markers(base_img, rows, xs_list)
             if corrected is not None:
                 base_img = corrected
-                markers = self.find_markers(base_img, location=marker_location, min_count=3)
+                markers = self.find_markers(base_img, location=marker_location, min_count=min_marker_count)
+                logger.info("[SideMarker] markers_after_skew_fix=%d", len(markers))
 
         work_img, processed_img = self._preprocess_image(base_img)
         debug_img = work_img.copy()
 
         markers = self._interpolate_missing_marks(markers)
+        logger.info("[SideMarker] markers_after_interpolate=%d required=%d", len(markers), len(questions))
 
         if len(markers) < len(questions):
             # 디버깅을 위해 찾은 마커라도 표시
             for m in markers:
                 cv2.circle(debug_img, (m['cx'], m['cy']), 5, (0, 0, 255), -1)
+            logger.warning(
+                "[SideMarker] timing_mark_fail markers=%d required=%d marker_location=%s",
+                len(markers),
+                len(questions),
+                str(marker_location),
+            )
             return "ERR", [], debug_img, "TIMING_MARK"
 
         # 2. 파라미터 추출 및 스케일 적용 (핵심 수정 부분)
@@ -863,6 +1135,14 @@ class OMREngine:
 
                 if self._check_roi(processed_img, rx, ry, rw, rh, debug_img, (0, 255, 0)):
                     marked_indices.append(r_idx)
+            logger.debug(
+                "[SideMarker][Q%d] base=(%d,%d) rois=%s marked=%s",
+                int(q_num),
+                int(base_cx),
+                int(base_cy),
+                rois,
+                marked_indices,
+            )
 
             status = self._determine_status(marked_indices)
             if status != "정상": 
@@ -970,7 +1250,18 @@ class OMREngine:
         if original_img is None:
             return "ERR", [], None, "IMG_NONE"
 
-        rotated_img, markers = self.ensure_correct_orientation(original_img, expected_location=marker_location)
+        min_marker_count = max(3, min(4, len(questions) if questions else 3))
+        logger.info(
+            "[MarkerQ] start marker_location=%s questions=%d min_marker_count=%d",
+            str(marker_location),
+            len(questions) if questions else 0,
+            int(min_marker_count),
+        )
+        rotated_img, markers = self.normalize_orientation(
+            original_img,
+            expected_location=marker_location,
+            min_count=min_marker_count,
+        )
         if rotated_img is None:
             return "ERR", [], None, "IMG_NONE"
 
@@ -978,7 +1269,14 @@ class OMREngine:
         debug_img = work_img.copy() if work_img is not None else None
 
         markers = self._interpolate_missing_marks(markers)
+        logger.info("[MarkerQ] markers_after_interpolate=%d", len(markers))
         if not questions or not markers:
+            logger.warning(
+                "[MarkerQ] timing_mark_fail questions=%d markers=%d marker_location=%s",
+                len(questions) if questions else 0,
+                len(markers) if markers else 0,
+                str(marker_location),
+            )
             return "ERR", [], debug_img, "TIMING_MARK"
 
         x_offset = int(float(layout.get("x_offset", 600)) * scale)
@@ -1043,6 +1341,14 @@ class OMREngine:
             for r_idx, (rx, ry, rw, rh) in enumerate(rois):
                 if self._check_roi(processed_img, rx, ry, rw, rh, debug_img, (0, 255, 0)):
                     marked_indices.append(r_idx)
+            logger.debug(
+                "[MarkerQ][Q%d] base=(%d,%d) rois=%s marked=%s",
+                int(q_num),
+                int(base_cx),
+                int(base_cy),
+                rois,
+                marked_indices,
+            )
 
             status = self._determine_status(marked_indices)
             if status != "정상":
