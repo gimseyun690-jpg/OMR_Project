@@ -115,22 +115,61 @@ class OMREngine:
 
     def align_image(self, img):
         """
-        입력 이미지를 기준 해상도(150dpi, 1240x1754)로 맞춤
+        입력 이미지를 기준 해상도(150dpi, 1240x1754)로 맞춤.
+        - 종횡비를 보존하고, 가로 스캔은 필요 시 90도 회전
+        - 비율 차이가 큰 경우에는 흰 배경 패딩(찌부 방지)
         """
-        if img is None: 
+        if img is None:
             return None, False, "image_none"
-        h, w = img.shape[:2]
-        if w == self.width and h == self.height:
-            return img, True, "original"
+        if len(img.shape) < 2:
+            return None, False, "invalid_shape"
+
+        target_w, target_h = int(self.width), int(self.height)
+        target_ratio = float(target_w) / float(target_h) if target_h > 0 else 1.0
+
+        work = img
+        h, w = work.shape[:2]
+        if w <= 0 or h <= 0:
+            return None, False, "invalid_size"
+
+        if w == target_w and h == target_h:
+            return work, True, "original"
+
+        # 가로로 스캔된 경우(비율이 반대로 더 가까운 경우)에는 먼저 90도 회전.
+        ratio_now = float(w) / float(h)
+        ratio_rot = float(h) / float(w)
+        rotated = False
+        if abs(ratio_rot - target_ratio) + 1e-6 < abs(ratio_now - target_ratio):
+            work = cv2.rotate(work, cv2.ROTATE_90_CLOCKWISE)
+            rotated = True
+            h, w = work.shape[:2]
 
         # 업/다운 스케일에 따라 보간 방식 선택
-        if w > self.width or h > self.height:
-            interp = cv2.INTER_AREA
-        else:
-            interp = cv2.INTER_CUBIC
+        scale = min(float(target_w) / float(w), float(target_h) / float(h))
+        new_w = max(1, int(round(float(w) * scale)))
+        new_h = max(1, int(round(float(h) * scale)))
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+        resized = cv2.resize(work, (new_w, new_h), interpolation=interp)
 
-        resized = cv2.resize(img, (self.width, self.height), interpolation=interp)
-        return resized, True, "resized"
+        # 비율이 거의 동일하면 전체 캔버스로 맞춤(기존 동작과 유사).
+        aspect_diff = abs((float(w) / float(h)) - target_ratio)
+        if new_w == target_w and new_h == target_h:
+            return resized, True, ("rotated_resized" if rotated else "resized")
+        if aspect_diff <= 0.03:
+            stretched = cv2.resize(resized, (target_w, target_h), interpolation=interp)
+            return stretched, True, ("rotated_resized" if rotated else "resized")
+
+        # 비율 차이가 큰 경우는 찌부를 피하기 위해 흰 배경에 가운데 배치.
+        if resized.ndim == 2:
+            canvas = np.full((target_h, target_w), 255, dtype=resized.dtype)
+        else:
+            canvas = np.full((target_h, target_w, resized.shape[2]), 255, dtype=resized.dtype)
+        x0 = max(0, (target_w - new_w) // 2)
+        y0 = max(0, (target_h - new_h) // 2)
+        x1 = min(target_w, x0 + new_w)
+        y1 = min(target_h, y0 + new_h)
+        canvas[y0:y1, x0:x1] = resized[0:(y1 - y0), 0:(x1 - x0)]
+        return canvas, True, ("rotated_padded" if rotated else "padded")
 
     def align_image_warp(self, img):
         """호환용 래퍼: 현재는 기준 해상도 리사이즈만 수행"""
@@ -171,27 +210,98 @@ class OMREngine:
     # =========================================================
     def find_markers(self, image, location="left", min_count=3):
         """
+        Robust timing-mark detector.
+        Strictly separates solid rectangular marks from text/lines/barcodes.
+
         location: left/right/top/bottom
-        - ROI 10% 우선, 실패 시 20%로 재시도
-        - Vertical: left/right (X 그룹핑)
-        - Horizontal: top/bottom (Y 그룹핑)
         """
+        # Strict filters requested:
+        # 1) Solidity >= 0.90
+        # 2) Fill ratio >= 0.70
+        # 3) Group size consistency (std/mean <= 0.20)
+        SOLIDITY_MIN = 0.90
+        FILL_RATIO_MIN = 0.70
+        SIZE_STD_MAX = 0.20
+
+        # Extra guards to suppress text/line-like noise.
+        EXTENT_MIN = 0.55
+        ASPECT_MIN = 0.45
+        ASPECT_MAX = 2.20
+        RECT_FILL_MIN = 0.65
+        RING_RATIO_MAX = 0.18
+
+        def _roi_from_location(img_h, img_w, loc, ratio):
+            if loc == "right":
+                x0 = int(img_w * (1.0 - ratio))
+                return x0, 0, img_w - x0, img_h
+            if loc == "top":
+                return 0, 0, img_w, int(img_h * ratio)
+            if loc == "bottom":
+                y0 = int(img_h * (1.0 - ratio))
+                return 0, y0, img_w, img_h - y0
+            return 0, 0, int(img_w * ratio), img_h
+
+        def _required_span_ratio(group_len):
+            if group_len <= 4:
+                return 0.20
+            if group_len <= 6:
+                return 0.24
+            return 0.30
+
+        def _cluster_candidates(cands, axis_key):
+            if not cands:
+                return []
+            ordered = sorted(cands, key=lambda c: int(c.get(axis_key, 0)))
+            axis_sizes = [int(c.get("w", 1)) if axis_key == "x" else int(c.get("h", 1)) for c in ordered]
+            median_size = float(np.median(np.asarray(axis_sizes, dtype=np.float32))) if axis_sizes else 1.0
+            gap_thr = max(12, int(round(median_size * 0.9)))
+
+            groups = []
+            cur = [ordered[0]]
+            for i in range(1, len(ordered)):
+                prev = int(ordered[i - 1].get(axis_key, 0))
+                curv = int(ordered[i].get(axis_key, 0))
+                if abs(curv - prev) <= gap_thr:
+                    cur.append(ordered[i])
+                else:
+                    groups.append(cur)
+                    cur = [ordered[i]]
+            groups.append(cur)
+            return groups
+
+        def _is_uniform_group(group):
+            if not group:
+                return False
+            if len(group) == 1:
+                return True
+            ws = np.asarray([max(1, int(c.get("w", 1))) for c in group], dtype=np.float32)
+            hs = np.asarray([max(1, int(c.get("h", 1))) for c in group], dtype=np.float32)
+            mean_w = float(np.mean(ws))
+            mean_h = float(np.mean(hs))
+            if mean_w <= 0 or mean_h <= 0:
+                return False
+            rel_std_w = float(np.std(ws)) / mean_w
+            rel_std_h = float(np.std(hs)) / mean_h
+            return rel_std_w <= SIZE_STD_MAX and rel_std_h <= SIZE_STD_MAX
+
+        def _validate_axis_spacing(group, axis_key):
+            if not group or len(group) < 3:
+                return bool(group)
+            coords = sorted([int(c.get(axis_key, 0)) for c in group])
+            gaps = np.diff(np.asarray(coords, dtype=np.float32))
+            if gaps.size == 0:
+                return False
+            median_gap = float(np.median(gaps))
+            if median_gap <= 1e-6:
+                return False
+            rel_std_gap = float(np.std(gaps)) / median_gap
+            return rel_std_gap <= 0.30
+
         def _detect_in_roi(img, loc, ratio):
             if img is None:
                 return []
             H, W = img.shape[:2]
-
-            loc = str(loc).strip().lower()
-            if loc == "right":
-                roi = (int(W * (1.0 - ratio)), 0, W - int(W * (1.0 - ratio)), H)
-            elif loc == "top":
-                roi = (0, 0, W, int(H * ratio))
-            elif loc == "bottom":
-                roi = (0, int(H * (1.0 - ratio)), W, H - int(H * (1.0 - ratio)))
-            else:
-                roi = (0, 0, int(W * ratio), H)
-
-            rx, ry, rw, rh = roi
+            rx, ry, rw, rh = _roi_from_location(H, W, loc, ratio)
             if rw <= 0 or rh <= 0:
                 return []
 
@@ -204,236 +314,233 @@ class OMREngine:
             contours_info = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
 
+            roi_area = float(max(1, rw * rh))
+            min_area = roi_area * 0.0001
+            max_area = roi_area * 0.012
+
             candidates = []
-            min_area = rw * rh * 0.0001
-            max_area = rw * rh * 0.01
-            rejected_area = 0
-            rejected_aspect = 0
-            rejected_solidity = 0
-            rejected_fill = 0
+            rej_area = 0
+            rej_aspect = 0
+            rej_solidity = 0
+            rej_fill = 0
+            rej_extent = 0
+            rej_edge = 0
+            rej_rect = 0
+            rej_ring = 0
 
             for cnt in contours:
-                area = cv2.contourArea(cnt)
+                area = float(cv2.contourArea(cnt))
                 if area < min_area or area > max_area:
-                    rejected_area += 1
+                    rej_area += 1
                     continue
 
                 lx, ly, w, h = cv2.boundingRect(cnt)
-                x = lx + rx
-                y = ly + ry
+                if w <= 1 or h <= 1:
+                    rej_area += 1
+                    continue
 
-                ratio_wh = float(w) / h if h > 0 else 0.0
-                if not (0.5 <= ratio_wh <= 2.0):
-                    rejected_aspect += 1
+                # Ignore boundary-touching blobs (common in table borders / crop edges).
+                if lx <= 0 or ly <= 0 or (lx + w) >= rw - 1 or (ly + h) >= rh - 1:
+                    rej_edge += 1
+                    continue
+
+                ratio_wh = float(w) / float(h)
+                if ratio_wh < ASPECT_MIN or ratio_wh > ASPECT_MAX:
+                    rej_aspect += 1
                     continue
 
                 hull = cv2.convexHull(cnt)
-                hull_area = cv2.contourArea(hull)
-                if hull_area == 0:
-                    rejected_solidity += 1
+                hull_area = float(cv2.contourArea(hull))
+                if hull_area <= 1e-6:
+                    rej_solidity += 1
                     continue
-                solidity = float(area) / hull_area
-                if solidity < 0.90:
-                    rejected_solidity += 1
+                solidity = area / hull_area
+                if solidity < SOLIDITY_MIN:
+                    rej_solidity += 1
                     continue
 
-                # In inverted binary image, a solid mark should occupy most pixels in bbox.
+                bbox_area = float(max(1, w * h))
+                extent = area / bbox_area
+                if extent < EXTENT_MIN:
+                    rej_extent += 1
+                    continue
+
+                rect = cv2.minAreaRect(cnt)
+                rw_rect, rh_rect = rect[1]
+                rect_area = float(rw_rect * rh_rect)
+                if rect_area <= 1e-6:
+                    rej_rect += 1
+                    continue
+                rect_fill = area / rect_area
+                if rect_fill < RECT_FILL_MIN:
+                    rej_rect += 1
+                    continue
+
                 box = binary[ly:ly + h, lx:lx + w]
                 if box is None or box.size == 0:
-                    rejected_fill += 1
+                    rej_fill += 1
                     continue
                 fill_ratio = float(cv2.countNonZero(box)) / float(box.size)
-                if fill_ratio < 0.70:
-                    rejected_fill += 1
+                if fill_ratio < FILL_RATIO_MIN:
+                    rej_fill += 1
                     continue
 
+                pad = max(2, int(round(0.35 * float(max(w, h)))))
+                ex1 = max(0, lx - pad)
+                ey1 = max(0, ly - pad)
+                ex2 = min(rw, lx + w + pad)
+                ey2 = min(rh, ly + h + pad)
+
+                expanded = binary[ey1:ey2, ex1:ex2]
+                if expanded is None or expanded.size == 0:
+                    rej_ring += 1
+                    continue
+
+                outer_nonzero = int(cv2.countNonZero(expanded))
+                inner_nonzero = int(cv2.countNonZero(box))
+                ring_area = int(expanded.size - box.size)
+                ring_nonzero = max(0, outer_nonzero - inner_nonzero)
+                ring_ratio = (float(ring_nonzero) / float(ring_area)) if ring_area > 0 else 1.0
+                if ring_ratio > RING_RATIO_MAX:
+                    rej_ring += 1
+                    continue
+
+                x = lx + rx
+                y = ly + ry
                 candidates.append(
-                    {"cx": x + w // 2, "cy": y + h // 2, "x": x, "y": y, "w": w, "h": h}
+                    {
+                        "cx": int(x + w // 2),
+                        "cy": int(y + h // 2),
+                        "x": int(x),
+                        "y": int(y),
+                        "w": int(w),
+                        "h": int(h),
+                        "solidity": float(solidity),
+                        "fill_ratio": float(fill_ratio),
+                        "ring_ratio": float(ring_ratio),
+                    }
                 )
 
             logger.debug(
-                "[MarkerDetect] loc=%s ratio=%.2f contours=%d kept=%d rej_area=%d rej_aspect=%d rej_solidity=%d rej_fill=%d",
+                "[MarkerDetect] loc=%s ratio=%.2f contours=%d kept=%d rej_area=%d rej_aspect=%d rej_solidity=%d rej_fill=%d rej_extent=%d rej_edge=%d rej_rect=%d rej_ring=%d",
                 loc,
-                ratio,
+                float(ratio),
                 len(contours),
                 len(candidates),
-                rejected_area,
-                rejected_aspect,
-                rejected_solidity,
-                rejected_fill,
+                rej_area,
+                rej_aspect,
+                rej_solidity,
+                rej_fill,
+                rej_extent,
+                rej_edge,
+                rej_rect,
+                rej_ring,
             )
-
             return candidates
-
-        def _filter_group_consistency(group):
-            """
-            Keep only uniformly-sized solid marks.
-            - Remove items deviating >20% from median width/height.
-            - Reject whole group when size standard deviation is too high.
-            """
-            if not group:
-                return []
-            if len(group) < 2:
-                return group
-
-            ws = np.asarray([max(1, int(c.get("w", 1))) for c in group], dtype=np.float32)
-            hs = np.asarray([max(1, int(c.get("h", 1))) for c in group], dtype=np.float32)
-            med_w = float(np.median(ws))
-            med_h = float(np.median(hs))
-            if med_w <= 0 or med_h <= 0:
-                return []
-
-            kept = []
-            for c in group:
-                w = float(max(1, int(c.get("w", 1))))
-                h = float(max(1, int(c.get("h", 1))))
-                if abs(w - med_w) / med_w > 0.20:
-                    continue
-                if abs(h - med_h) / med_h > 0.20:
-                    continue
-                kept.append(c)
-
-            if len(kept) < 2:
-                return []
-
-            kept_ws = np.asarray([max(1, int(c.get("w", 1))) for c in kept], dtype=np.float32)
-            kept_hs = np.asarray([max(1, int(c.get("h", 1))) for c in kept], dtype=np.float32)
-            med_kw = float(np.median(kept_ws))
-            med_kh = float(np.median(kept_hs))
-            if med_kw <= 0 or med_kh <= 0:
-                return []
-
-            rel_std_w = float(np.std(kept_ws)) / med_kw
-            rel_std_h = float(np.std(kept_hs)) / med_kh
-            if rel_std_w > 0.20 or rel_std_h > 0.20:
-                return []
-
-            return kept
-
-        def _validate_axis_spacing(group, axis_key):
-            """
-            Reject groups that are too random on the primary axis.
-            """
-            if not group or len(group) < 3:
-                return False if not group else True
-            coords = sorted([int(c.get(axis_key, 0)) for c in group])
-            gaps = np.diff(np.asarray(coords, dtype=np.float32))
-            if gaps.size == 0:
-                return True
-            median_gap = float(np.median(gaps))
-            if median_gap <= 1e-6:
-                return False
-            rel_std_gap = float(np.std(gaps)) / median_gap
-            return rel_std_gap <= 0.45
-
-        def _required_span_ratio(group_len):
-            """
-            4문항처럼 마커 개수가 적은 용지도 통과하도록 동적 기준 적용.
-            """
-            if group_len <= 4:
-                return 0.20
-            if group_len <= 6:
-                return 0.24
-            return 0.30
 
         try:
             if image is None:
                 return []
 
-            loc = str(location).strip().lower()
-            candidates = _detect_in_roi(image, loc, 0.10)
-            if not candidates:
-                candidates = _detect_in_roi(image, loc, 0.20)
+            loc = str(location or "left").strip().lower()
+            if loc not in ("left", "right", "top", "bottom"):
+                loc = "left"
+
+            candidates = []
+            for ratio in (0.10, 0.15, 0.20):
+                candidates = _detect_in_roi(image, loc, ratio)
+                if candidates:
+                    break
+
             if not candidates:
                 logger.info("[MarkerDetect] loc=%s min_count=%d -> no candidates", loc, int(min_count))
                 return []
 
-            if loc in ("top", "bottom"):
-                candidates.sort(key=lambda c: c["y"])
-                groups = []
-                current_group = [candidates[0]]
-                for i in range(1, len(candidates)):
-                    if abs(candidates[i]["y"] - candidates[i - 1]["y"]) < 15:
-                        current_group.append(candidates[i])
-                    else:
-                        groups.append(current_group)
-                        current_group = [candidates[i]]
-                groups.append(current_group)
-
-                groups = [_filter_group_consistency(g) for g in groups]
-                groups = [g for g in groups if len(g) >= int(min_count)]
-                if not groups:
-                    return []
-
-                if loc == "top":
-                    best_group = min(groups, key=lambda g: np.median([c["y"] for c in g]))
-                else:
-                    best_group = max(groups, key=lambda g: np.median([c["y"] for c in g]))
-
-                best_group.sort(key=lambda c: c["cx"])
-                span_x = max(c["cx"] for c in best_group) - min(c["cx"] for c in best_group)
-                if span_x < (image.shape[1] * _required_span_ratio(len(best_group))):
-                    logger.debug(
-                        "[MarkerDetect] loc=%s group_reject=span span=%.1f required=%.1f len=%d",
-                        loc,
-                        float(span_x),
-                        float(image.shape[1] * _required_span_ratio(len(best_group))),
-                        len(best_group),
-                    )
-                    return []
-                if not _validate_axis_spacing(best_group, "cx"):
-                    logger.debug("[MarkerDetect] loc=%s group_reject=axis_spacing len=%d", loc, len(best_group))
-                    return []
-                logger.info(
-                    "[MarkerDetect] loc=%s selected=%d span_x=%.1f",
-                    loc,
-                    len(best_group),
-                    float(span_x),
-                )
-                return best_group
-
-            candidates.sort(key=lambda c: c["x"])
-            groups = []
-            current_group = [candidates[0]]
-            for i in range(1, len(candidates)):
-                if abs(candidates[i]["x"] - candidates[i - 1]["x"]) < 15:
-                    current_group.append(candidates[i])
-                else:
-                    groups.append(current_group)
-                    current_group = [candidates[i]]
-            groups.append(current_group)
-
-            groups = [_filter_group_consistency(g) for g in groups]
+            group_axis = "y" if loc in ("top", "bottom") else "x"
+            groups = _cluster_candidates(candidates, axis_key=group_axis)
             groups = [g for g in groups if len(g) >= int(min_count)]
+            groups = [g for g in groups if _is_uniform_group(g)]
             if not groups:
+                logger.info("[MarkerDetect] loc=%s -> no uniform groups", loc)
                 return []
 
-            if loc == "right":
-                best_group = max(groups, key=lambda g: np.median([c["x"] for c in g]))
+            if loc in ("top", "bottom"):
+                primary_key = "y"
+                span_key = "cx"
+                span_limit = float(image.shape[1]) * _required_span_ratio(max(1, int(min_count) + 1))
+                side_fn = min if loc == "top" else max
             else:
-                best_group = min(groups, key=lambda g: np.median([c["x"] for c in g]))
+                primary_key = "x"
+                span_key = "cy"
+                span_limit = float(image.shape[0]) * _required_span_ratio(max(1, int(min_count) + 1))
+                side_fn = min if loc == "left" else max
 
-            best_group.sort(key=lambda c: c["cy"])
-            span_y = max(c["cy"] for c in best_group) - min(c["cy"] for c in best_group)
-            if span_y < (image.shape[0] * _required_span_ratio(len(best_group))):
+            groups = sorted(groups, key=lambda g: len(g), reverse=True)
+            edge_group = side_fn(
+                groups,
+                key=lambda g: float(np.median([int(c.get(primary_key, 0)) for c in g])),
+            )
+
+            # If same edge has several groups, prefer the longer/cleaner one.
+            edge_axis = float(np.median([int(c.get(primary_key, 0)) for c in edge_group]))
+            same_edge = []
+            for g in groups:
+                g_axis = float(np.median([int(c.get(primary_key, 0)) for c in g]))
+                if abs(g_axis - edge_axis) <= 12.0:
+                    same_edge.append(g)
+            if same_edge:
+                edge_group = max(
+                    same_edge,
+                    key=lambda g: (
+                        len(g),
+                        float(np.mean([float(c.get("solidity", 0.0)) for c in g])),
+                        float(np.mean([float(c.get("fill_ratio", 0.0)) for c in g])),
+                    ),
+                )
+
+            span = float(
+                max(int(c.get(span_key, 0)) for c in edge_group)
+                - min(int(c.get(span_key, 0)) for c in edge_group)
+            )
+            if span < span_limit:
                 logger.debug(
                     "[MarkerDetect] loc=%s group_reject=span span=%.1f required=%.1f len=%d",
                     loc,
-                    float(span_y),
-                    float(image.shape[0] * _required_span_ratio(len(best_group))),
-                    len(best_group),
+                    span,
+                    span_limit,
+                    len(edge_group),
                 )
                 return []
-            if not _validate_axis_spacing(best_group, "cy"):
-                logger.debug("[MarkerDetect] loc=%s group_reject=axis_spacing len=%d", loc, len(best_group))
+
+            if not _validate_axis_spacing(edge_group, span_key):
+                logger.debug("[MarkerDetect] loc=%s group_reject=axis_spacing len=%d", loc, len(edge_group))
                 return []
+
+            mean_ring = float(np.mean([float(c.get("ring_ratio", 1.0)) for c in edge_group]))
+            if mean_ring > 0.12:
+                logger.debug(
+                    "[MarkerDetect] loc=%s group_reject=ring mean_ring=%.3f len=%d",
+                    loc,
+                    mean_ring,
+                    len(edge_group),
+                )
+                return []
+
+            if loc in ("top", "bottom"):
+                edge_group = sorted(edge_group, key=lambda c: int(c.get("cx", 0)))
+            else:
+                edge_group = sorted(edge_group, key=lambda c: int(c.get("cy", 0)))
+
             logger.info(
-                "[MarkerDetect] loc=%s selected=%d span_y=%.1f",
+                "[MarkerDetect] loc=%s selected=%d span=%.1f solidity=%.3f fill=%.3f ring=%.3f",
                 loc,
-                len(best_group),
-                float(span_y),
+                len(edge_group),
+                span,
+                float(np.mean([float(c.get("solidity", 0.0)) for c in edge_group])),
+                float(np.mean([float(c.get("fill_ratio", 0.0)) for c in edge_group])),
+                mean_ring,
             )
-            return best_group
+            return edge_group
 
         except Exception as e:
             logger.exception("[MarkerDetect] exception: %s", e)
@@ -457,8 +564,6 @@ class OMREngine:
         if target_loc not in ("left", "right", "top", "bottom"):
             target_loc = "left"
 
-        directions = ("left", "right", "top", "bottom")
-
         def _rotate_quarter_turns(src, k_cw):
             k = int(k_cw) % 4
             if k == 0:
@@ -469,90 +574,102 @@ class OMREngine:
                 return cv2.rotate(src, cv2.ROTATE_180)
             return cv2.rotate(src, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
-        # 1) Detect markers on all 4 sides in the original image.
-        side_markers = {loc: self.find_markers(image, location=loc, min_count=min_count) for loc in directions}
-        side_counts = {loc: len(side_markers.get(loc, [])) for loc in directions}
-        best_count = max(side_counts.values()) if side_counts else 0
+        def _marker_span_ratio(markers, location, shape):
+            if not markers or len(markers) < 2:
+                return 0.0
+            h, w = shape[:2]
+            if str(location).strip().lower() in ("top", "bottom"):
+                coords = [int(m.get("cx", 0)) for m in markers]
+                denom = max(1.0, float(w - 1))
+            else:
+                coords = [int(m.get("cy", 0)) for m in markers]
+                denom = max(1.0, float(h - 1))
+            span = float(max(coords) - min(coords)) if coords else 0.0
+            return span / denom
+
+        def _marker_quality(markers):
+            if not markers:
+                return 0.0
+            mean_solidity = float(np.mean([float(m.get("solidity", 0.0)) for m in markers]))
+            mean_fill = float(np.mean([float(m.get("fill_ratio", 0.0)) for m in markers]))
+            mean_ring = float(np.mean([float(m.get("ring_ratio", 1.0)) for m in markers]))
+            # higher is better
+            return (mean_solidity * 0.45) + (mean_fill * 0.45) + ((1.0 - mean_ring) * 0.10)
+
+        # Evaluate expected-side markers directly at each quarter turn.
+        trials = []
+        side_counts_0 = {
+            "left": len(self.find_markers(image, location="left", min_count=min_count)),
+            "right": len(self.find_markers(image, location="right", min_count=min_count)),
+            "top": len(self.find_markers(image, location="top", min_count=min_count)),
+            "bottom": len(self.find_markers(image, location="bottom", min_count=min_count)),
+        }
         logger.info(
-            "[Orientation] target=%s min_count=%d side_counts=%s best=%d",
+            "[Orientation] target=%s min_count=%d side_counts_0=%s",
             target_loc,
             int(min_count),
-            side_counts,
-            int(best_count),
+            side_counts_0,
         )
 
-        # No reliable markers at all -> fallback by testing target side after each rotation.
-        if best_count <= 0:
-            best_img = image
-            best_markers = []
-            best_target_count = 0
-            best_k = 0
-            for k in (0, 1, 2, 3):
-                rotated = _rotate_quarter_turns(image, k)
-                markers = self.find_markers(rotated, location=target_loc, min_count=min_count)
-                count = len(markers)
-                if count > best_target_count:
-                    best_target_count = count
-                    best_img = rotated
-                    best_markers = markers
-                    best_k = k
-            logger.info(
-                "[Orientation] fallback(no_side) selected_k_cw=%d target=%s markers=%d",
-                int(best_k),
-                target_loc,
-                int(best_target_count),
+        for k in (0, 1, 2, 3):
+            rotated = _rotate_quarter_turns(image, k)
+            markers = self.find_markers(rotated, location=target_loc, min_count=min_count)
+            count = len(markers)
+            span_ratio = _marker_span_ratio(markers, target_loc, rotated.shape)
+            quality = _marker_quality(markers)
+            # Count dominates, span/quality break ties.
+            score = (count * 1000.0) + (quality * 10.0) + span_ratio
+            trials.append(
+                {
+                    "k": int(k),
+                    "img": rotated,
+                    "markers": markers,
+                    "count": int(count),
+                    "span_ratio": float(span_ratio),
+                    "quality": float(quality),
+                    "score": float(score),
+                }
             )
-            return best_img, best_markers
 
-        # 2) Pick current marker side.
-        # If expected side is tied for best, keep current orientation for stability.
-        if side_counts.get(target_loc, 0) == best_count:
-            current_loc = target_loc
-        else:
-            current_loc = max(directions, key=lambda loc: side_counts.get(loc, 0))
+        # Tie-break priority for deterministic, stable selection.
+        k_priority = {0: 0, 1: 1, 3: 2, 2: 3}
+        best = max(
+            trials,
+            key=lambda t: (
+                t["score"],
+                -k_priority.get(int(t["k"]), 9),
+            ),
+        )
+        base = next((t for t in trials if t["k"] == 0), trials[0])
 
-        # 3) Compute rotation (clockwise quarter-turns) so current_loc -> target_loc.
-        # CW side order mapping: top -> right -> bottom -> left -> top
-        cw_order = ["top", "right", "bottom", "left"]
-        cur_idx = cw_order.index(current_loc)
-        tgt_idx = cw_order.index(target_loc)
-        k_cw = (tgt_idx - cur_idx) % 4
+        # Stability guard:
+        # if current orientation already has enough markers, rotate only when evidence is clearly better.
+        if base["count"] >= int(max(1, min_count)) and best["k"] != 0:
+            required_count = max(
+                int(base["count"]) + 2,
+                int(np.ceil(float(base["count"]) * 1.40)),
+            )
+            if int(best["count"]) < required_count:
+                best = base
+
+        # Weak-evidence guard:
+        # when both are low-confidence, avoid unnecessary quarter-turn flips.
+        if int(base["count"]) > 0 and best["k"] != 0:
+            if int(best["count"]) <= int(base["count"]) + 1:
+                if float(best["span_ratio"]) <= float(base["span_ratio"]) + 0.05:
+                    if float(best.get("quality", 0.0)) <= float(base.get("quality", 0.0)) + 0.03:
+                        best = base
+
         logger.info(
-            "[Orientation] current=%s target=%s rotate_k_cw=%d",
-            current_loc,
+            "[Orientation] selected_k_cw=%d target=%s count=%d span=%.3f quality=%.3f trials=%s",
+            int(best["k"]),
             target_loc,
-            int(k_cw),
+            int(best["count"]),
+            float(best["span_ratio"]),
+            float(best.get("quality", 0.0)),
+            [(int(t["k"]), int(t["count"]), round(float(t.get("quality", 0.0)), 3)) for t in trials],
         )
-
-        rotated = _rotate_quarter_turns(image, k_cw)
-        markers = self.find_markers(rotated, location=target_loc, min_count=min_count)
-        logger.info("[Orientation] post_rotate target=%s markers=%d", target_loc, int(len(markers)))
-
-        # 4) Robust fallback:
-        # If rotation result is weak, choose the rotation that maximizes target-side markers.
-        if len(markers) <= 0:
-            best_img = rotated
-            best_markers = markers
-            best_target_count = 0
-            best_k = k_cw
-            for k in (0, 1, 2, 3):
-                trial = _rotate_quarter_turns(image, k)
-                trial_markers = self.find_markers(trial, location=target_loc, min_count=min_count)
-                count = len(trial_markers)
-                if count > best_target_count:
-                    best_target_count = count
-                    best_img = trial
-                    best_markers = trial_markers
-                    best_k = k
-            logger.info(
-                "[Orientation] fallback(post_rotate_fail) selected_k_cw=%d target=%s markers=%d",
-                int(best_k),
-                target_loc,
-                int(best_target_count),
-            )
-            return best_img, best_markers
-
-        return rotated, markers
+        return best["img"], best["markers"]
 
     def ensure_gross_rotation(self, original_img):
         """
@@ -1000,7 +1117,9 @@ class OMREngine:
         """
         if original_img is None: return "ERROR", [], None, "IMG_NONE"
 
-        min_marker_count = max(3, min(4, len(questions) if questions else 3))
+        # Orientation/axis estimation should stay permissive.
+        # Requiring 4 markers caused frequent wrong rotations when 1 marker was faint.
+        min_marker_count = 3
         logger.info(
             "[SideMarker] start marker_location=%s questions=%d min_marker_count=%d",
             str(marker_location),
@@ -1250,7 +1369,9 @@ class OMREngine:
         if original_img is None:
             return "ERR", [], None, "IMG_NONE"
 
-        min_marker_count = max(3, min(4, len(questions) if questions else 3))
+        # Orientation/axis estimation should stay permissive.
+        # Requiring 4 markers caused frequent wrong rotations when 1 marker was faint.
+        min_marker_count = 3
         logger.info(
             "[MarkerQ] start marker_location=%s questions=%d min_marker_count=%d",
             str(marker_location),
