@@ -363,12 +363,78 @@ class DBManager:
 
     def renumber_read_nums(self, db_path, ordered_read_nums):
         """
-        ordered_read_nums: [old_read_num, ...] 순서대로 1..N 재부여
+        ordered_read_nums:
+          - legacy: [old_read_num, ...]
+          - safe mode: [(id, old_read_num), ...]
+        입력 순서대로 1..N 재부여.
         """
         with self._get_conn(db_path) as conn:
             cursor = conn.cursor()
-            for new_num, old_num in enumerate(ordered_read_nums, start=1):
-                cursor.execute("UPDATE tblScanData SET read_num = ? WHERE read_num = ?", (new_num, old_num))
+            if not ordered_read_nums:
+                return
+
+            uses_row_id = (
+                isinstance(ordered_read_nums[0], (tuple, list))
+                and len(ordered_read_nums[0]) >= 2
+            )
+
+            entries = []
+            if uses_row_id:
+                # (id, read_num) 형태는 row id 기준으로 안전하게 재번호를 부여한다.
+                for item in ordered_read_nums:
+                    try:
+                        row_id = int(item[0])
+                        old_num = int(item[1])
+                    except Exception:
+                        continue
+                    entries.append((row_id, old_num))
+            else:
+                # legacy 입력은 read_num 기준.
+                seen = set()
+                for item in ordered_read_nums:
+                    try:
+                        old_num = int(item)
+                    except Exception:
+                        continue
+                    if old_num in seen:
+                        continue
+                    seen.add(old_num)
+                    entries.append((None, old_num))
+
+            if not entries:
+                return
+
+            cursor.execute("SELECT COALESCE(MAX(read_num), 0) FROM tblScanData")
+            max_read_num = cursor.fetchone()[0] or 0
+            temp_base = int(max_read_num) + len(entries) + 1000
+
+            # 1차: 임시 번호로 이동
+            for offset, (row_id, old_num) in enumerate(entries, start=1):
+                temp_num = temp_base + offset
+                if uses_row_id and row_id is not None:
+                    cursor.execute(
+                        "UPDATE tblScanData SET read_num = ? WHERE id = ?",
+                        (temp_num, row_id),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE tblScanData SET read_num = ? WHERE read_num = ?",
+                        (temp_num, old_num),
+                    )
+
+            # 2차: 최종 1..N 부여
+            for new_num, (row_id, old_num) in enumerate(entries, start=1):
+                temp_num = temp_base + new_num
+                if uses_row_id and row_id is not None:
+                    cursor.execute(
+                        "UPDATE tblScanData SET read_num = ? WHERE id = ?",
+                        (new_num, row_id),
+                    )
+                else:
+                    cursor.execute(
+                        "UPDATE tblScanData SET read_num = ? WHERE read_num = ?",
+                        (new_num, temp_num),
+                    )
             conn.commit()
 
     def get_all_scans(self, db_path):
@@ -384,6 +450,16 @@ class DBManager:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM tblScanData")
             return cursor.fetchone()[0]
+
+    def get_max_read_num(self, db_path):
+        with self._get_conn(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(MAX(read_num), 0) FROM tblScanData")
+            value = cursor.fetchone()[0]
+            try:
+                return int(value or 0)
+            except Exception:
+                return 0
 
     def get_scan_count_by_place_room(self, db_path, place, room):
         with self._get_conn(db_path) as conn:

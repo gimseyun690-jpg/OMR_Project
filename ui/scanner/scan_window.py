@@ -23,10 +23,13 @@ class ScannerReadingView(QWidget, UiSetupMixin, GridSyncMixin, ReviewFlowMixin, 
 
         # 초기 변수 초기화
         self.total_read = 0
+        self.next_read_num = 1
         self.worker = None
         self.session_start_read_num = 1
+        self.session_end_read_num = 0
         self.thread_pool = QThreadPool()
         self.scan_in_progress = False
+        self._stop_requested = False
         self.pending_results = {}
         self.next_emit_read_num = 1
         self.pending_analyze = 0

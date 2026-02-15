@@ -57,6 +57,9 @@ class ScanSessionController:
     def get_all_scans(self, db_path: str):
         return self.service.get_all_scans(db_path)
 
+    def get_next_read_num(self, db_path: str) -> int:
+        return self.service.get_next_read_num(db_path)
+
     def recalc_error_messages(self, db_path: str):
         return self.service.recalc_error_messages(db_path)
 

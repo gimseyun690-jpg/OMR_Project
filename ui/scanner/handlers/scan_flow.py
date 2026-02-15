@@ -57,13 +57,19 @@ class ScanFlowMixin:
 
         # [추가] 이번 스캔 세션 카운트 초기화
         self.current_session_count = 0
-        self.session_start_read_num = self.total_read + 1
+        try:
+            self.next_read_num = int(self.controller.get_next_read_num(self.current_db_path))
+        except Exception:
+            self.next_read_num = int(getattr(self, "next_read_num", 1))
+        self.session_start_read_num = self.next_read_num
+        self.session_end_read_num = self.session_start_read_num - 1
         self.pending_results = {}
         self.next_emit_read_num = self.session_start_read_num
         self.pending_analyze = 0
         self.auto_next_pending = False
         self.current_summary_row = None
         self.session_start_room_text = self.cb_room.currentText()
+        self._stop_requested = False
 
         # 새 시험실 스캔 시작 시 그리드 UI를 비워서 누적 표시를 방지
         if hasattr(self, "main_grid"):
@@ -95,6 +101,11 @@ class ScanFlowMixin:
 
     @Slot(str)
     def on_image_received(self, image_path):
+        if getattr(self, "_stop_requested", False):
+            return
+        read_num = int(getattr(self, "next_read_num", 1))
+        self.next_read_num = read_num + 1
+        self.session_end_read_num = read_num
         self.total_read += 1
         self.current_session_count += 1  # 현재 세션 카운트
 
@@ -106,7 +117,7 @@ class ScanFlowMixin:
         task = AnalyzeTask(
             controller=self.controller,
             image_path=image_path,
-            read_num=self.total_read,
+            read_num=read_num,
             place=self.cb_place.currentText(),
             room=self.cb_room.currentText(),
         )
@@ -199,6 +210,14 @@ class ScanFlowMixin:
 
 
     def on_finished(self):
+        if getattr(self, "_stop_requested", False):
+            self._stop_requested = False
+            self.reset_ui_state()
+            self.control_panel.btn_retry.setEnabled(False)
+            self.update_review_summary()
+            QMessageBox.information(self, "중단", "스캔이 중단되었습니다.")
+            return
+
         # [수정] 요약 테이블 갱신
         place = self.cb_place.currentText()
         room = self.cb_room.currentText()
@@ -221,6 +240,7 @@ class ScanFlowMixin:
             self.update_review_summary()
     @Slot(str)
     def on_error(self, msg):
+        self._stop_requested = False
         code, retryable, auto_retry, user_msg = self._parse_scan_error(msg)
         self.last_error_code = code
 
@@ -242,7 +262,7 @@ class ScanFlowMixin:
         self.control_panel.btn_scan.setEnabled(True)
         self.control_panel.btn_scan.setText("현재시험실 스캔(R)")
         self.control_panel.btn_next.setEnabled(True)
-        self.control_panel.btn_stop.setEnabled(True)
+        self.control_panel.btn_stop.setEnabled(False)
         self.scan_in_progress = False
 
     def scan_next_room(self):
@@ -254,13 +274,13 @@ class ScanFlowMixin:
     def stop_scan(self):
         if not self.scan_in_progress:
             return
+        self._stop_requested = True
+        self.control_panel.btn_stop.setEnabled(False)
         if self.worker:
             try:
                 self.worker.stop()
             except Exception as e:
                 print(f"[SCAN] 중단 실패: {e}")
-        self.reset_ui_state()
-        QMessageBox.information(self, "중단", "스캔이 중단되었습니다.")
 
     def retry_last_scan(self):
         if self.scan_in_progress:

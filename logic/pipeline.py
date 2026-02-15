@@ -117,7 +117,9 @@ class ScanPipeline:
     def _is_new_marker_schema(self) -> bool:
         if not isinstance(self.form_data, dict):
             return False
-        return "fields" in self.form_data and "questions" in self.form_data and "layout_mode" not in self.form_data
+        has_questions = ("questions" in self.form_data) or ("question_groups" in self.form_data)
+        has_layout = isinstance(self.form_data.get("question_layout", {}), dict)
+        return has_questions and has_layout and "layout_mode" not in self.form_data
 
     def _save_debug_if_needed(self, debug_img, image_path: str, reason: str):
         if not self.debug_save_on_error or debug_img is None:

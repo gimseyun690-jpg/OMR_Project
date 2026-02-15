@@ -476,55 +476,63 @@ class OMREngine:
                 side_fn = min if loc == "left" else max
 
             groups = sorted(groups, key=lambda g: len(g), reverse=True)
-            edge_group = side_fn(
-                groups,
-                key=lambda g: float(np.median([int(c.get(primary_key, 0)) for c in g])),
-            )
+            axis_den = float((image.shape[0] - 1) if primary_key == "y" else (image.shape[1] - 1))
+            span_den = float((image.shape[1] - 1) if span_key == "cx" else (image.shape[0] - 1))
+            edge_ref = 0.0
+            if loc == "bottom":
+                edge_ref = float(image.shape[0] - 1)
+            elif loc == "right":
+                edge_ref = float(image.shape[1] - 1)
 
-            # If same edge has several groups, prefer the longer/cleaner one.
-            edge_axis = float(np.median([int(c.get(primary_key, 0)) for c in edge_group]))
-            same_edge = []
+            scored_groups = []
             for g in groups:
-                g_axis = float(np.median([int(c.get(primary_key, 0)) for c in g]))
-                if abs(g_axis - edge_axis) <= 12.0:
-                    same_edge.append(g)
-            if same_edge:
-                edge_group = max(
-                    same_edge,
-                    key=lambda g: (
-                        len(g),
-                        float(np.mean([float(c.get("solidity", 0.0)) for c in g])),
-                        float(np.mean([float(c.get("fill_ratio", 0.0)) for c in g])),
-                    ),
+                span = float(
+                    max(int(c.get(span_key, 0)) for c in g)
+                    - min(int(c.get(span_key, 0)) for c in g)
+                )
+                if span < span_limit:
+                    continue
+                if not _validate_axis_spacing(g, span_key):
+                    continue
+
+                mean_ring = float(np.mean([float(c.get("ring_ratio", 1.0)) for c in g]))
+                if mean_ring > 0.12:
+                    continue
+
+                mean_solidity = float(np.mean([float(c.get("solidity", 0.0)) for c in g]))
+                mean_fill = float(np.mean([float(c.get("fill_ratio", 0.0)) for c in g]))
+                axis_med = float(np.median([int(c.get(primary_key, 0)) for c in g]))
+                edge_distance = abs(axis_med - edge_ref) / max(1.0, axis_den)
+                span_ratio = span / max(1.0, span_den)
+
+                # Prioritize longer/cleaner groups while keeping them near the requested edge.
+                score = (
+                    (len(g) * 1000.0)
+                    + (span_ratio * 25.0)
+                    + (mean_solidity * 8.0)
+                    + (mean_fill * 8.0)
+                    - (edge_distance * 30.0)
+                )
+                scored_groups.append(
+                    {
+                        "group": g,
+                        "score": float(score),
+                        "span": float(span),
+                        "mean_ring": float(mean_ring),
+                        "mean_solidity": float(mean_solidity),
+                        "mean_fill": float(mean_fill),
+                        "axis_med": float(axis_med),
+                    }
                 )
 
-            span = float(
-                max(int(c.get(span_key, 0)) for c in edge_group)
-                - min(int(c.get(span_key, 0)) for c in edge_group)
-            )
-            if span < span_limit:
-                logger.debug(
-                    "[MarkerDetect] loc=%s group_reject=span span=%.1f required=%.1f len=%d",
-                    loc,
-                    span,
-                    span_limit,
-                    len(edge_group),
-                )
+            if not scored_groups:
+                logger.info("[MarkerDetect] loc=%s -> no valid groups after span/spacing/ring checks", loc)
                 return []
 
-            if not _validate_axis_spacing(edge_group, span_key):
-                logger.debug("[MarkerDetect] loc=%s group_reject=axis_spacing len=%d", loc, len(edge_group))
-                return []
-
-            mean_ring = float(np.mean([float(c.get("ring_ratio", 1.0)) for c in edge_group]))
-            if mean_ring > 0.12:
-                logger.debug(
-                    "[MarkerDetect] loc=%s group_reject=ring mean_ring=%.3f len=%d",
-                    loc,
-                    mean_ring,
-                    len(edge_group),
-                )
-                return []
+            best_group = max(scored_groups, key=lambda it: float(it.get("score", 0.0)))
+            edge_group = best_group["group"]
+            span = float(best_group["span"])
+            mean_ring = float(best_group["mean_ring"])
 
             if loc in ("top", "bottom"):
                 edge_group = sorted(edge_group, key=lambda c: int(c.get("cx", 0)))
@@ -532,13 +540,14 @@ class OMREngine:
                 edge_group = sorted(edge_group, key=lambda c: int(c.get("cy", 0)))
 
             logger.info(
-                "[MarkerDetect] loc=%s selected=%d span=%.1f solidity=%.3f fill=%.3f ring=%.3f",
+                "[MarkerDetect] loc=%s selected=%d span=%.1f solidity=%.3f fill=%.3f ring=%.3f axis=%.1f",
                 loc,
                 len(edge_group),
                 span,
-                float(np.mean([float(c.get("solidity", 0.0)) for c in edge_group])),
-                float(np.mean([float(c.get("fill_ratio", 0.0)) for c in edge_group])),
+                float(best_group["mean_solidity"]),
+                float(best_group["mean_fill"]),
                 mean_ring,
+                float(best_group["axis_med"]),
             )
             return edge_group
 
@@ -611,6 +620,12 @@ class OMREngine:
             side_counts_0,
         )
 
+        # For top/bottom marker sheets: if current orientation already shows
+        # significantly more markers on another side, allow rotation more aggressively.
+        # For top/bottom marker sheets, prioritize rotating to the best-scored
+        # orientation over conservative "keep current angle" guards.
+        prefer_rotation = target_loc in ("top", "bottom")
+
         for k in (0, 1, 2, 3):
             rotated = _rotate_quarter_turns(image, k)
             markers = self.find_markers(rotated, location=target_loc, min_count=min_count)
@@ -644,7 +659,7 @@ class OMREngine:
 
         # Stability guard:
         # if current orientation already has enough markers, rotate only when evidence is clearly better.
-        if base["count"] >= int(max(1, min_count)) and best["k"] != 0:
+        if (not prefer_rotation) and base["count"] >= int(max(1, min_count)) and best["k"] != 0:
             required_count = max(
                 int(base["count"]) + 2,
                 int(np.ceil(float(base["count"]) * 1.40)),
@@ -654,7 +669,7 @@ class OMREngine:
 
         # Weak-evidence guard:
         # when both are low-confidence, avoid unnecessary quarter-turn flips.
-        if int(base["count"]) > 0 and best["k"] != 0:
+        if (not prefer_rotation) and int(base["count"]) > 0 and best["k"] != 0:
             if int(best["count"]) <= int(base["count"]) + 1:
                 if float(best["span_ratio"]) <= float(base["span_ratio"]) + 0.05:
                     if float(best.get("quality", 0.0)) <= float(base.get("quality", 0.0)) + 0.03:
@@ -791,9 +806,20 @@ class OMREngine:
     def _interpolate_missing_marks(self, markers):
         if not markers or len(markers) < 2:
             return markers
-        markers_sorted = sorted(markers, key=lambda m: m["cy"])
-        ys = [m["cy"] for m in markers_sorted]
-        gaps = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+
+        xs = [int(m.get("cx", 0)) for m in markers]
+        ys = [int(m.get("cy", 0)) for m in markers]
+        span_x = (max(xs) - min(xs)) if xs else 0
+        span_y = (max(ys) - min(ys)) if ys else 0
+
+        # Top/bottom marker rows are horizontal; left/right are vertical.
+        is_horizontal = span_x >= span_y
+        axis_key = "cx" if is_horizontal else "cy"
+        sec_key = "cy" if is_horizontal else "cx"
+
+        markers_sorted = sorted(markers, key=lambda m: int(m.get(axis_key, 0)))
+        coords = [int(m.get(axis_key, 0)) for m in markers_sorted]
+        gaps = [coords[i + 1] - coords[i] for i in range(len(coords) - 1)]
         if not gaps:
             return markers_sorted
         median_gap = float(np.median(gaps))
@@ -805,17 +831,61 @@ class OMREngine:
             cur_m = markers_sorted[i]
             next_m = markers_sorted[i + 1]
             new_marks.append(cur_m)
-            gap = next_m["cy"] - cur_m["cy"]
+            gap = int(next_m.get(axis_key, 0)) - int(cur_m.get(axis_key, 0))
             if gap >= 1.8 * median_gap:
                 insert_count = int(round(gap / median_gap)) - 1
                 insert_count = max(1, insert_count)
                 for j in range(insert_count):
                     t = (j + 1) / float(insert_count + 1)
-                    cx = int(round(cur_m["cx"] + (next_m["cx"] - cur_m["cx"]) * t))
-                    cy = int(round(cur_m["cy"] + (next_m["cy"] - cur_m["cy"]) * t))
+                    axis_v = int(round(
+                        int(cur_m.get(axis_key, 0))
+                        + (int(next_m.get(axis_key, 0)) - int(cur_m.get(axis_key, 0))) * t
+                    ))
+                    sec_v = int(round(
+                        int(cur_m.get(sec_key, 0))
+                        + (int(next_m.get(sec_key, 0)) - int(cur_m.get(sec_key, 0))) * t
+                    ))
+                    cx = axis_v if is_horizontal else sec_v
+                    cy = sec_v if is_horizontal else axis_v
                     new_marks.append({"cx": cx, "cy": cy, "interpolated": True})
         new_marks.append(markers_sorted[-1])
-        return sorted(new_marks, key=lambda m: m["cy"])
+        return sorted(new_marks, key=lambda m: int(m.get(axis_key, 0)))
+
+    def _sample_markers_evenly(self, markers_sorted, target_count, axis_key="cx"):
+        if not markers_sorted or int(target_count) <= 0:
+            return []
+
+        ordered = sorted(markers_sorted, key=lambda m: int(m.get(axis_key, 0)))
+        n = len(ordered)
+        target = int(target_count)
+
+        if n <= target:
+            return ordered
+        if target == 1:
+            return [ordered[n // 2]]
+
+        raw_indices = np.linspace(0, n - 1, target)
+        picked = []
+        used = set()
+
+        for raw_idx in raw_indices:
+            idx = int(round(float(raw_idx)))
+            if idx in used:
+                left = idx - 1
+                right = idx + 1
+                while left >= 0 or right < n:
+                    if right < n and right not in used:
+                        idx = right
+                        break
+                    if left >= 0 and left not in used:
+                        idx = left
+                        break
+                    left -= 1
+                    right += 1
+            used.add(idx)
+            picked.append(ordered[idx])
+
+        return sorted(picked, key=lambda m: int(m.get(axis_key, 0)))
 
     def correct_rotation_by_markers(self, image, rows, xs_list):
         import numpy as np
@@ -1328,7 +1398,35 @@ class OMREngine:
         if original_img is None or not fields:
             return False, {}, None
 
-        work_img, processed_img = self._preprocess_image(original_img)
+        marker_field_types = {"marker_digit_columns", "marker_single_choice_column"}
+        marker_field = next(
+            (
+                f for f in fields
+                if isinstance(f, dict) and str(f.get("type", "")).strip().lower() in marker_field_types
+            ),
+            None,
+        )
+
+        marker_location = "left"
+        marker_axis = []
+        base_img = original_img
+
+        if marker_field is not None:
+            marker_location = str(marker_field.get("marker_location", "left")).strip().lower()
+            base_img, markers = self.normalize_orientation(
+                original_img,
+                expected_location=marker_location,
+                min_count=3,
+            )
+            if base_img is None:
+                return False, {}, None
+            axis_key = "cx" if marker_location in ("top", "bottom") else "cy"
+            marker_axis = sorted(
+                self._interpolate_missing_marks(list(markers or [])),
+                key=lambda m: int(m.get(axis_key, 0)),
+            )
+
+        work_img, processed_img = self._preprocess_image(base_img)
         debug_img = np.zeros_like(work_img) if work_img is not None else None
 
         info = {}
@@ -1359,6 +1457,24 @@ class OMREngine:
                     info[f_name] = val
                 else:
                     is_ok = False
+            elif f_type == "marker_digit_columns":
+                if not marker_axis:
+                    is_ok = False
+                    continue
+                ok, val = self._decode_marker_digit_columns(processed_img, marker_axis, field, scale, debug_img)
+                if ok:
+                    info[f_name] = val
+                else:
+                    is_ok = False
+            elif f_type == "marker_single_choice_column":
+                if not marker_axis:
+                    is_ok = False
+                    continue
+                ok, val = self._decode_marker_single_choice_column(processed_img, marker_axis, field, scale, debug_img)
+                if ok:
+                    info[f_name] = val
+                else:
+                    is_ok = False
 
         return is_ok, info, debug_img
 
@@ -1369,9 +1485,38 @@ class OMREngine:
         if original_img is None:
             return "ERR", [], None, "IMG_NONE"
 
-        # Orientation/axis estimation should stay permissive.
-        # Requiring 4 markers caused frequent wrong rotations when 1 marker was faint.
+        is_horizontal_target = str(marker_location).strip().lower() in ("top", "bottom")
+        numbering_order = str(layout.get("numbering_order", "column_major")).strip().lower() if isinstance(layout, dict) else "column_major"
+        layout_columns = int(layout.get("columns", 0)) if isinstance(layout, dict) else 0
+        rows_per_col_for_count = int(layout.get("rows_per_col", 40)) if isinstance(layout, dict) else 40
+        if rows_per_col_for_count <= 0:
+            rows_per_col_for_count = 40
+
+        required_cols = 0
+        if is_horizontal_target:
+            explicit_cols = [
+                int(q.get("col_index"))
+                for q in questions
+                if isinstance(q, dict) and q.get("col_index") is not None
+            ]
+            if explicit_cols:
+                required_cols = max(explicit_cols) + 1
+            else:
+                q_nums = [
+                    int(q.get("no", i + 1))
+                    for i, q in enumerate(questions)
+                    if isinstance(q, dict)
+                ]
+                max_q_num = max(q_nums) if q_nums else len(questions)
+                required_cols = int(np.ceil(float(max_q_num) / float(max(1, rows_per_col_for_count))))
+            if numbering_order == "row_major" and layout_columns > 0:
+                required_cols = layout_columns
+
+        # For top/bottom forms, demand stricter marker evidence to avoid false "정상" from text noise.
         min_marker_count = 3
+        if is_horizontal_target and required_cols > 0:
+            min_marker_count = max(3, required_cols - 1)
+
         logger.info(
             "[MarkerQ] start marker_location=%s questions=%d min_marker_count=%d",
             str(marker_location),
@@ -1389,8 +1534,19 @@ class OMREngine:
         work_img, processed_img = self._preprocess_image(rotated_img)
         debug_img = work_img.copy() if work_img is not None else None
 
-        markers = self._interpolate_missing_marks(markers)
+        raw_markers = list(markers or [])
+        markers = self._interpolate_missing_marks(raw_markers)
         logger.info("[MarkerQ] markers_after_interpolate=%d", len(markers))
+        if debug_img is not None and markers:
+            # Show only actually detected timing marks in red.
+            # Interpolated marks are helper points and can look like false positives.
+            for m in markers:
+                if m.get("interpolated"):
+                    continue
+                try:
+                    cv2.circle(debug_img, (int(m.get("cx", 0)), int(m.get("cy", 0))), 3, (0, 0, 255), -1)
+                except Exception:
+                    pass
         if not questions or not markers:
             logger.warning(
                 "[MarkerQ] timing_mark_fail questions=%d markers=%d marker_location=%s",
@@ -1408,6 +1564,8 @@ class OMREngine:
         row_start_y = int(float(layout.get("row_start_y", 360)) * scale)
         row_dy = int(float(layout.get("row_dy", 70)) * scale)
         rows_per_col = int(layout.get("rows_per_col", 40))
+        row_start_from_marker = bool(layout.get("row_start_from_marker", True))
+        marker_start_index = int(layout.get("marker_start_index", 1))
 
         sheet_results = []
         has_error = False
@@ -1420,6 +1578,133 @@ class OMREngine:
         if is_horizontal and rows_per_col <= 0:
             return "ERR", [], debug_img, "LAYOUT"
 
+        if is_horizontal and marker_start_index > 1:
+            start_idx = marker_start_index - 1
+            if start_idx >= len(marks_by_x):
+                logger.warning(
+                    "[MarkerQ] marker_start_index_out_of_range start=%d markers=%d",
+                    int(marker_start_index),
+                    len(marks_by_x),
+                )
+                return "ERR", [], debug_img, "TIMING_MARK"
+            marks_by_x = marks_by_x[start_idx:]
+
+        img_h, img_w = work_img.shape[:2]
+        if is_horizontal and marks_by_x:
+            marker_cx_min = 4
+            marker_cx_max = img_w - 4
+            max_choices = max(
+                [
+                    int(q.get("choices", 5))
+                    for q in questions
+                    if isinstance(q, dict)
+                ] or [5]
+            )
+            max_choices = max(1, max_choices)
+
+            roi_min_dx = int(x_offset + self.global_offset_x)
+            roi_max_dx = int(x_offset + ((max_choices - 1) * choice_dx) + box_w + self.global_offset_x)
+            marker_cx_min = int(max(marker_cx_min, -roi_min_dx))
+            marker_cx_max = int(min(marker_cx_max, img_w - roi_max_dx))
+
+            if marker_cx_min < marker_cx_max:
+                bounded_marks = [
+                    m for m in marks_by_x
+                    if marker_cx_min <= int(m.get("cx", 0)) <= marker_cx_max
+                ]
+                if bounded_marks:
+                    if len(bounded_marks) != len(marks_by_x):
+                        logger.info(
+                            "[MarkerQ] marker_bounds_filter %d->%d cx_range=[%d,%d]",
+                            len(marks_by_x),
+                            len(bounded_marks),
+                            int(marker_cx_min),
+                            int(marker_cx_max),
+                        )
+                    marks_by_x = bounded_marks
+
+            if required_cols <= 0:
+                explicit_cols = [
+                    int(q.get("col_index"))
+                    for q in questions
+                    if isinstance(q, dict) and q.get("col_index") is not None
+                ]
+                if explicit_cols:
+                    required_cols = max(explicit_cols) + 1
+                else:
+                    q_nums = [
+                        int(q.get("no", i + 1))
+                        for i, q in enumerate(questions)
+                        if isinstance(q, dict)
+                    ]
+                    max_q_num = max(q_nums) if q_nums else len(questions)
+                    required_cols = int(np.ceil(float(max_q_num) / float(max(1, rows_per_col))))
+
+            if required_cols > 0 and len(marks_by_x) > required_cols:
+                full_span = int(marks_by_x[-1].get("cx", 0)) - int(marks_by_x[0].get("cx", 0))
+                head_end = min(len(marks_by_x) - 1, required_cols - 1)
+                head_span = int(marks_by_x[head_end].get("cx", 0)) - int(marks_by_x[0].get("cx", 0))
+                dense_head = full_span > 0 and head_span < int(round(full_span * 0.55))
+                many_markers = len(marks_by_x) >= (required_cols * 2)
+
+                if dense_head or many_markers:
+                    sampled = self._sample_markers_evenly(marks_by_x, required_cols, axis_key="cx")
+                    if len(sampled) == required_cols:
+                        logger.info(
+                            "[MarkerQ] column_markers_resampled %d->%d xs=%s",
+                            len(marks_by_x),
+                            int(required_cols),
+                            [int(m.get("cx", 0)) for m in sampled],
+                        )
+                        marks_by_x = sampled
+
+            if len(marks_by_x) < required_cols and len(marks_by_x) >= 2:
+                xs = [int(m.get("cx", 0)) for m in marks_by_x]
+                gaps = np.diff(np.asarray(xs, dtype=np.float32))
+                median_gap = int(round(float(np.median(gaps)))) if gaps.size > 0 else 0
+                median_gap = max(1, median_gap)
+
+                # Edge compensation for top/bottom forms:
+                # when one outer column marker is missed, extrapolate by median spacing.
+                while len(marks_by_x) < required_cols:
+                    can_append = (int(marks_by_x[-1].get("cx", 0)) + median_gap) <= int(marker_cx_max)
+                    can_prepend = (int(marks_by_x[0].get("cx", 0)) - median_gap) >= int(marker_cx_min)
+
+                    if can_append:
+                        last = marks_by_x[-1]
+                        prev = marks_by_x[-2]
+                        dy = int(last.get("cy", 0)) - int(prev.get("cy", 0))
+                        marks_by_x.append(
+                            {
+                                "cx": int(last.get("cx", 0)) + median_gap,
+                                "cy": int(last.get("cy", 0)) + dy,
+                                "interpolated": True,
+                            }
+                        )
+                    elif can_prepend:
+                        first = marks_by_x[0]
+                        second = marks_by_x[1]
+                        dy = int(first.get("cy", 0)) - int(second.get("cy", 0))
+                        marks_by_x.insert(
+                            0,
+                            {
+                                "cx": int(first.get("cx", 0)) - median_gap,
+                                "cy": int(first.get("cy", 0)) + dy,
+                                "interpolated": True,
+                            }
+                        )
+                    else:
+                        break
+
+                if len(marks_by_x) < required_cols:
+                    logger.warning(
+                        "[MarkerQ] insufficient column markers: found=%d required=%d marker_location=%s",
+                        len(marks_by_x),
+                        int(required_cols),
+                        str(marker_location),
+                    )
+                    return "ERR", [], debug_img, "TIMING_MARK"
+
         for i, q in enumerate(questions):
             q_num = q.get("no", i + 1)
             row_index = q.get("row_index")
@@ -1431,15 +1716,24 @@ class OMREngine:
                 row_in_col = q.get("row_in_col")
                 if col_index is None or row_in_col is None:
                     idx = int(q_num) - 1
-                    col_index = idx // rows_per_col
-                    row_in_col = idx % rows_per_col
+                    if numbering_order == "row_major":
+                        cols = int(layout_columns) if int(layout_columns) > 0 else int(required_cols)
+                        cols = max(1, cols)
+                        col_index = idx % cols
+                        row_in_col = idx // cols
+                    else:
+                        col_index = idx // rows_per_col
+                        row_in_col = idx % rows_per_col
 
                 if not (0 <= int(col_index) < len(marks_by_x)):
                     return "ERR", [], debug_img, "TIMING_MARK"
 
                 base_mark = marks_by_x[int(col_index)]
                 base_cx = base_mark["cx"]
-                base_cy = row_start_y + (int(row_in_col) * row_dy)
+                if row_start_from_marker:
+                    base_cy = int(base_mark.get("cy", 0)) + row_start_y + (int(row_in_col) * row_dy)
+                else:
+                    base_cy = row_start_y + (int(row_in_col) * row_dy)
                 start_y = base_cy - (box_h // 2) + self.global_offset_y + row_offset_y
             else:
                 if row_index is not None and 0 <= int(row_index) < len(marks_by_y):
@@ -1594,4 +1888,141 @@ class OMREngine:
                 picked_label = ch.get("label", "")
         
         if hits == 1: return True, picked_label
+        return False, ""
+
+    def _decode_marker_digit_columns(self, img, markers, cfg, scale, debug_img):
+        if not markers:
+            return False, ""
+
+        marker_start_index = int(cfg.get("marker_start_index", 1)) - 1
+        digits = int(cfg.get("digits", 0))
+        if digits <= 0:
+            return False, ""
+
+        rows_default = int(cfg.get("rows", 10))
+        rows_per_digit = cfg.get("rows_per_digit", [])
+        if not isinstance(rows_per_digit, list):
+            rows_per_digit = []
+
+        x_offset = int(float(cfg.get("x_offset", 0)) * scale)
+        y_offset = int(float(cfg.get("y_offset", 0)) * scale)
+        row_dy = int(float(cfg.get("row_dy", cfg.get("row_h", 20))) * scale)
+        box_w = max(1, int(float(cfg.get("box_w", 40)) * scale))
+        box_h = max(1, int(float(cfg.get("box_h", 40)) * scale))
+
+        result = []
+        for digit_idx in range(digits):
+            m_idx = marker_start_index + digit_idx
+            if m_idx < 0 or m_idx >= len(markers):
+                return False, ""
+
+            rows = rows_default
+            if digit_idx < len(rows_per_digit):
+                try:
+                    rows = int(rows_per_digit[digit_idx])
+                except Exception:
+                    rows = rows_default
+            if rows <= 0:
+                return False, ""
+
+            base = markers[m_idx]
+            center_x = int(base.get("cx", 0)) + x_offset + self.global_offset_x
+            best_r = -1
+            max_ratio = -1.0
+            hits = 0
+
+            for r in range(rows):
+                center_y = int(base.get("cy", 0)) + y_offset + (r * row_dy) + self.global_offset_y
+                rx = center_x - (box_w // 2)
+                ry = center_y - (box_h // 2)
+
+                roi_c = self._clamp_roi(img, rx, ry, box_w, box_h)
+                if roi_c is None:
+                    continue
+                cx, cy, cw, ch = roi_c
+                roi = img[cy:cy + ch, cx:cx + cw]
+                ratio = cv2.countNonZero(roi) / float(cw * ch) if (cw * ch) > 0 else 0.0
+
+                if debug_img is not None:
+                    color = (255, 255, 0) if ratio > self.pixel_threshold else (50, 50, 50)
+                    cv2.rectangle(debug_img, (rx, ry), (rx + box_w, ry + box_h), color, 1)
+
+                if ratio > self.pixel_threshold:
+                    hits += 1
+                    if ratio > max_ratio:
+                        max_ratio = ratio
+                        best_r = r
+
+            if hits == 1 and best_r >= 0:
+                result.append(str(best_r))
+            else:
+                return False, ""
+
+        return True, "".join(result)
+
+    def _decode_marker_single_choice_column(self, img, markers, cfg, scale, debug_img):
+        if not markers:
+            return False, ""
+
+        marker_index = int(cfg.get("marker_index", 1)) - 1
+        if marker_index < 0 or marker_index >= len(markers):
+            return False, ""
+
+        raw_choices = cfg.get("choices", [])
+        labels = []
+        per_choice_offsets = []
+        if isinstance(raw_choices, list):
+            for ch in raw_choices:
+                if isinstance(ch, dict):
+                    labels.append(str(ch.get("label", "")))
+                    try:
+                        if ch.get("y_offset") is None:
+                            per_choice_offsets.append(None)
+                        else:
+                            per_choice_offsets.append(float(ch.get("y_offset")))
+                    except Exception:
+                        per_choice_offsets.append(None)
+                else:
+                    labels.append(str(ch))
+                    per_choice_offsets.append(None)
+        labels = [lb for lb in labels if lb != ""]
+        if not labels:
+            return False, ""
+
+        x_offset = int(float(cfg.get("x_offset", 0)) * scale)
+        y_offset = int(float(cfg.get("y_offset", 0)) * scale)
+        choice_dy = int(float(cfg.get("choice_dy", cfg.get("row_dy", 40))) * scale)
+        raw_choice_offsets = cfg.get("choice_y_offsets", [])
+        choice_offsets = []
+        if isinstance(raw_choice_offsets, list):
+            for v in raw_choice_offsets:
+                try:
+                    choice_offsets.append(int(float(v) * scale))
+                except Exception:
+                    continue
+        box_w = max(1, int(float(cfg.get("box_w", 40)) * scale))
+        box_h = max(1, int(float(cfg.get("box_h", 40)) * scale))
+
+        base = markers[marker_index]
+        center_x = int(base.get("cx", 0)) + x_offset + self.global_offset_x
+        base_y = int(base.get("cy", 0)) + y_offset + self.global_offset_y
+
+        hits = 0
+        picked = ""
+
+        for idx, label in enumerate(labels):
+            if idx < len(choice_offsets):
+                center_y = base_y + int(choice_offsets[idx])
+            elif idx < len(per_choice_offsets) and per_choice_offsets[idx] is not None:
+                center_y = base_y + int(float(per_choice_offsets[idx]) * scale)
+            else:
+                center_y = base_y + (idx * choice_dy)
+            rx = center_x - (box_w // 2)
+            ry = center_y - (box_h // 2)
+            if self._check_roi(img, rx, ry, box_w, box_h, debug_img, (255, 0, 255)):
+                hits += 1
+                picked = label
+
+        if hits == 1:
+            return True, picked
         return False, ""

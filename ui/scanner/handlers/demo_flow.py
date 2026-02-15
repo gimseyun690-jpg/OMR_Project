@@ -42,7 +42,12 @@ class DemoFlowMixin:
         current_place = self.cb_place.currentText()
         current_room = self.cb_room.currentText()
         self.current_session_count = 0
-        self.session_start_read_num = self.total_read + 1
+        try:
+            self.next_read_num = int(self.controller.get_next_read_num(self.current_db_path))
+        except Exception:
+            self.next_read_num = int(getattr(self, "next_read_num", 1))
+        self.session_start_read_num = self.next_read_num
+        self.session_end_read_num = self.session_start_read_num - 1
         self.pending_results = {}
         self.next_emit_read_num = self.session_start_read_num
         self.pending_analyze = 0
@@ -64,7 +69,7 @@ class DemoFlowMixin:
         self.demo_progress.show()
 
         # 워커 생성
-        start_read_num = self.total_read
+        start_read_num = self.session_start_read_num - 1
         self.demo_worker = DemoWorker(
             controller=self.controller,
             files=files,
@@ -91,7 +96,13 @@ class DemoFlowMixin:
     def _on_demo_row(self, row_data):
         # UI에 결과 반영 (메인 스레드)
         self.main_grid.add_row_data(row_data)
-        self.total_read = int(row_data[0])  # read_num 諛섏쁺
+        try:
+            row_read_num = int(row_data[0])
+            self.session_end_read_num = max(int(getattr(self, "session_end_read_num", 0)), row_read_num)
+            self.next_read_num = max(int(getattr(self, "next_read_num", 1)), row_read_num + 1)
+        except Exception:
+            row_read_num = None
+        self.total_read += 1
         self.current_session_count += 1
         if len(row_data) > 7 and hasattr(self.control_panel, "image_viewer"):
             self.control_panel.image_viewer.set_image_path(

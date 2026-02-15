@@ -125,11 +125,15 @@ class ReviewFlowMixin:
                         else:
                             rois = self.pipeline.form_manager.get_fixed_rois(scale=scale)
                             _, _, debug_img = self.pipeline.engine.analyze_sheet_cv(aligned_img, rois)
+                        debug_img = self._blend_custom_fields_debug(debug_img, aligned_img, scale)
             except Exception as e:
                 print(f"[REVIEW] debug overlay 실패: {e}")
 
             dlg = ErrorCorrectionDialog(self, debug_img, scan_results, image_path)
-            session_total = max(0, self.total_read - self.session_start_read_num + 1)
+            session_total = max(
+                0,
+                int(getattr(self, "session_end_read_num", 0)) - int(getattr(self, "session_start_read_num", 1)) + 1,
+            )
             dlg.lbl_idx.setText(f"{current_idx + 1}/{session_total}")  # 오류 순번/세션 총 검사 수
 
             # exec_() 호출 시 창을 닫을 때까지 대기
@@ -184,23 +188,74 @@ class ReviewFlowMixin:
     def parse_result_string(self, result_str):
         """결과 문자열 "103"을 검사용 리스트로 변환."""
         parsed = []
-        for i, char in enumerate(result_str):
+        normalized = str(result_str or "")
+        is_legacy_binary = set(normalized).issubset({"0", "1", "2", "3"})
+        for i, char in enumerate(normalized):
             marked = []
             status = "정상"
 
-            if char == "1":
-                marked = [0]  # 찬성
-            elif char == "2":
-                marked = [1]  # 반대
-            elif char == "3":  # 중복
+            if char in ("X", "x"):
                 marked = [0, 1]
                 status = "중복"
-            elif char == "0":  # 공백
+            elif char == "3" and is_legacy_binary:
+                marked = [0, 1]
+                status = "중복"
+            elif char == "0":
                 marked = []
                 status = "공백"
+            elif char.isdigit() and char != "0":
+                marked = [int(char) - 1]
 
             parsed.append({"q_num": i + 1, "marked": marked, "status": status})
         return parsed
+
+    def _blend_custom_fields_debug(self, debug_img, aligned_img, scale: float):
+        if debug_img is None or aligned_img is None:
+            return debug_img
+        if not hasattr(self, "pipeline"):
+            return debug_img
+
+        form_data = getattr(self.pipeline, "form_data", None)
+        if not isinstance(form_data, dict):
+            return debug_img
+
+        fields = form_data.get("fields", [])
+        if not isinstance(fields, list) or not fields:
+            return debug_img
+
+        base_img = aligned_img
+        try:
+            marker_location = form_data.get("marker_location", "left")
+            if self.pipeline._is_new_marker_schema():
+                oriented_img, _ = self.pipeline.engine.normalize_orientation(
+                    aligned_img,
+                    expected_location=marker_location,
+                    min_count=3,
+                )
+                if oriented_img is not None:
+                    base_img = oriented_img
+        except Exception:
+            pass
+
+        try:
+            _, _, fields_debug = self.pipeline.engine.analyze_custom_fields(base_img, fields, scale)
+            if fields_debug is None:
+                return debug_img
+            if debug_img.shape[:2] != fields_debug.shape[:2]:
+                return debug_img
+
+            # fields_debug has a black background, so blend only where it drew overlays.
+            overlay_mask = np.any(fields_debug > 0, axis=2)
+            if not np.any(overlay_mask):
+                return debug_img
+
+            mixed = cv2.addWeighted(debug_img, 0.40, fields_debug, 0.95, 0)
+            out = debug_img.copy()
+            out[overlay_mask] = mixed[overlay_mask]
+            return out
+        except Exception as e:
+            print(f"[REVIEW] fields overlay 실패: {e}")
+            return debug_img
 
     def save_corrected_data(self, original_row, modified_results):
         """수정된 결과를 서비스로 저장."""
@@ -286,6 +341,7 @@ class ReviewFlowMixin:
                     else:
                         rois = self.pipeline.form_manager.get_fixed_rois(scale=scale)
                         _, _, debug_img = self.pipeline.engine.analyze_sheet_cv(aligned_img, rois)
+                    debug_img = self._blend_custom_fields_debug(debug_img, aligned_img, scale)
         except Exception as e:
             print(f"[REVIEW] debug overlay 실패: {e}")
 
@@ -307,11 +363,15 @@ class ReviewFlowMixin:
     def update_review_summary(self):
         if not self.current_db_path:
             return
+        start_read_num = int(getattr(self, "session_start_read_num", 1))
+        end_read_num = int(getattr(self, "session_end_read_num", start_read_num - 1))
+        if end_read_num < start_read_num:
+            return
         task = ReviewSummaryTask(
             self.db,
             self.current_db_path,
-            self.session_start_read_num,
-            self.total_read,
+            start_read_num,
+            end_read_num,
         )
         task.signals.result.connect(self._apply_review_summary)
         task.signals.error.connect(self._on_summary_error)

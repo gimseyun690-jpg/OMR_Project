@@ -592,13 +592,9 @@ class ErrorCorrectionDialog(QDialog):
 
                 self._warp_pixmap = None
                 if self.image_cv is not None:
-                    # 전달받은 이미지는 디버그/정렬 이미지로 간주
-                    if self.image_cv.shape[:2] == (self._engine.height, self._engine.width):
-                        self._warp_pixmap = self._cv_to_pixmap(self.image_cv)
-                    else:
-                        aligned_img, ok, _ = self._engine.align_image_warp(self.image_cv)
-                        if ok and aligned_img is not None:
-                            self._warp_pixmap = self._cv_to_pixmap(aligned_img)
+                    # The caller (review flow) already passes analyzed/aligned debug image.
+                    # Re-aligning here can re-rotate top-marker forms back to portrait.
+                    self._warp_pixmap = self._cv_to_pixmap(self.image_cv)
                 self._render_image()
             except Exception as e:
                 print(f"[ErrorCorrectionDialog] update_image failed: {e}")

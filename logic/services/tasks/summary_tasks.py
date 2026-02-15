@@ -61,6 +61,7 @@ class ReviewSummaryTask(QRunnable):
             total_in_session += 1
 
             mark_result = str(row[1] or "")
+            normalized_result = mark_result.upper()
             is_valid = row[2]
             exam_no = str(row[3] or "").strip()
 
@@ -68,11 +69,14 @@ class ReviewSummaryTask(QRunnable):
             if is_valid == 0:
                 needs_review = True
                 invalid_cnt += 1
-            if "0" in mark_result or "3" in mark_result:
+            is_legacy_binary = set(normalized_result).issubset({"0", "1", "2", "3"})
+            has_blank = "0" in normalized_result
+            has_dup = ("X" in normalized_result) or ("3" in normalized_result and is_legacy_binary)
+            if has_blank or has_dup:
                 needs_review = True
-                if "3" in mark_result:
+                if has_dup:
                     dup_cnt += 1
-                if mark_result.replace("0", "") == "":
+                if normalized_result.replace("0", "") == "":
                     blank_cnt += 1
 
             lookup_key = exam_no if exam_no else str(read_num)

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import getpass
 import os
+from datetime import datetime
 
 from logic.pipeline import ScanPipeline
 from logic.services.db_repository import DBRepository
 
 
 class ScanService:
-    """파이프라인+DB를 묶는 서비스 계층(UI는 여기만 호출)."""
+    """파이프라인 + DB를 묶는 서비스 계층(UI는 여기만 호출)."""
 
     def __init__(self, db_repo: DBRepository | None = None):
         self.db = db_repo or DBRepository()
@@ -35,7 +37,7 @@ class ScanService:
         self.pipeline.warp_enabled = bool(enabled)
 
     def process_image(self, image_path: str, read_num: int, place: str, room: str, warp_enabled: bool | None = None):
-        """이미지 분석 후 결과 저장까지 수행."""
+        """이미지 분석 + DB 저장까지 수행."""
         row_data, save_data = self.pipeline.analyze_image(
             image_path=image_path,
             read_num=read_num,
@@ -48,23 +50,23 @@ class ScanService:
         return row_data
 
     def build_error_queue(self, db_path: str, check_blank: bool, check_etc: bool):
-        """점검 대상 오류만 필터링."""
+        """검토 대상 오류만 필터링."""
         rows = self.db.get_all_scans(db_path)
         queue = []
         for row in rows:
             is_valid = row[7]
-            mark_result = row[6]
+            mark_result = str(row[6] or "")
             if is_valid == 1:
                 continue
             is_blank_paper = (mark_result.replace("0", "") == "")
             if is_blank_paper and check_blank:
                 queue.append(row)
-            elif not is_blank_paper and check_etc:
+            elif (not is_blank_paper) and check_etc:
                 queue.append(row)
         return queue
 
     def get_summary_rows(self, db_path: str):
-        """스캐너/시험실 요약 테이블용 데이터."""
+        """스캐너별 요약 테이블 데이터."""
         return self.db.get_summary_by_scanner(db_path)
 
     def get_statistics(self, db_path: str):
@@ -72,7 +74,7 @@ class ScanService:
         return self.db.get_statistics(db_path)
 
     def get_grid_rows(self, db_path: str, place: str | None = None, room: str | None = None):
-        """메인 그리드용 데이터(고사장/시험실 필터 가능)."""
+        """메인 그리드용 데이터. place/room 필터 지원."""
         if place is not None and room is not None:
             return self.db.get_scans_by_place_room(db_path, place, room)
         return self.db.get_all_scans(db_path)
@@ -80,19 +82,39 @@ class ScanService:
     def get_all_scans(self, db_path: str):
         return self.db.get_all_scans(db_path)
 
+    def get_next_read_num(self, db_path: str) -> int:
+        max_read_num = self.db.get_max_read_num(db_path)
+        return int(max_read_num) + 1
+
     def recalc_error_messages(self, db_path: str):
         if not db_path:
             return 0
+
         self.pipeline.set_project(db_path)
+        current_sheet_code = ""
+        if isinstance(self.pipeline.form_data, dict):
+            current_sheet_code = str(self.pipeline.form_manager.get_sheet_code() or "").strip()
+
         rows = self.db.get_all_scans(db_path)
         updated = 0
+        skipped_sheet_mismatch = 0
+
         for row in rows:
             read_num = row[1]
             place = row[2]
             room = row[3]
             image_path = row[4]
+            row_sheet_code = str(row[5] or "").strip()
+
+            # 선택된 폼과 sheet_code가 다르면 재판독으로 덮어쓰지 않는다.
+            if current_sheet_code and current_sheet_code != "Unknown":
+                if row_sheet_code and row_sheet_code != "Unknown" and row_sheet_code != current_sheet_code:
+                    skipped_sheet_mismatch += 1
+                    continue
+
             if not image_path or not os.path.exists(image_path):
                 continue
+
             try:
                 _, save_data = self.pipeline.analyze_image(
                     image_path=image_path,
@@ -103,8 +125,10 @@ class ScanService:
             except Exception as e:
                 print(f"[RECALC] read_num={read_num} 실패: {e}")
                 continue
+
             if not save_data:
                 continue
+
             self.db.update_scan_result_detail(
                 db_path,
                 read_num,
@@ -117,6 +141,13 @@ class ScanService:
                 save_data.get("subject"),
             )
             updated += 1
+
+        if skipped_sheet_mismatch:
+            print(
+                f"[RECALC] sheet_code 불일치로 {skipped_sheet_mismatch}건 건너뜀 "
+                f"(선택폼={current_sheet_code})"
+            )
+
         return updated
 
     def renumber_read_nums(self, db_path: str, ordered_read_nums):
@@ -137,42 +168,80 @@ class ScanService:
     def delete_scan_result(self, db_path: str, read_num: int):
         return self.db.delete_scan_result(db_path, read_num)
 
+    def _encode_modified_results(self, modified_results) -> str:
+        encoded = []
+        for row in modified_results:
+            raw_marked = row.get("marked", [])
+            marked = []
+            for v in raw_marked:
+                try:
+                    iv = int(v)
+                except Exception:
+                    continue
+                if iv >= 0:
+                    marked.append(iv)
+            marked = sorted(set(marked))
+
+            if not marked:
+                encoded.append("0")
+            elif len(marked) > 1:
+                encoded.append("X")
+            else:
+                encoded.append(str(marked[0] + 1))
+
+        return "".join(encoded)
+
     def save_corrected_data(self, db_path: str, original_row, modified_results):
-        """수정 결과를 DB에 저장하고 오류 상태를 정리."""
-        new_result_str = ""
-        for r in modified_results:
-            val = "0"
-            if len(r['marked']) == 0:
-                val = "0"
-            elif len(r['marked']) > 1:
-                val = "3"
-            elif 0 in r['marked']:
-                val = "1"
-            elif 1 in r['marked']:
-                val = "2"
-            new_result_str += val
+        """수정 결과를 DB에 저장하고 오류 상태를 정리한다."""
+        new_result_str = self._encode_modified_results(modified_results)
 
         read_num = original_row[1]
         image_path = original_row[4]
         before_str = original_row[6]
+        editor = getpass.getuser()
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        self.db.insert_manual_edit(
-            db_path,
-            read_num=read_num,
-            image_path=image_path,
-            before_result=before_str,
-            after_result=new_result_str,
-            reason="오류수정(수동수정)"
-        )
+        # 수동수정 로그 + 결과 반영은 하나의 트랜잭션으로 처리한다.
+        with self.db.connect(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS manual_edits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    read_num INTEGER NOT NULL,
+                    image_path TEXT,
+                    before_result TEXT,
+                    after_result TEXT,
+                    editor TEXT,
+                    reason TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO manual_edits
+                (read_num, image_path, before_result, after_result, editor, reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    read_num,
+                    image_path,
+                    before_str,
+                    new_result_str,
+                    editor,
+                    "오류수정(수동수정)",
+                    created_at,
+                ),
+            )
+            cur.execute(
+                """
+                UPDATE tblScanData
+                SET mark_result = ?, is_valid = 1, error_message = ?, review_done = 1
+                WHERE read_num = ?
+                """,
+                (new_result_str, "", read_num),
+            )
+            conn.commit()
 
-        self.db.update_scan_result(db_path, read_num, new_result_str, 1)
-        self.db.update_scan_meta(db_path, read_num, scanner_name=None, room_no=None, image_path=None)
-        try:
-            with self.db.connect(db_path) as conn:
-                cur = conn.cursor()
-                cur.execute("UPDATE tblScanData SET error_message = ? WHERE read_num = ?", ("", read_num))
-                conn.commit()
-        except Exception:
-            pass
-        self.db.update_review_done(db_path, read_num, 1)
         return new_result_str

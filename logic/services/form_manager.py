@@ -58,6 +58,23 @@ class FormManager:
         if not isinstance(self.form_data, dict):
             return 40, 40, 600, 750
 
+        roi_params = self.form_data.get("roi_params", {})
+        if not isinstance(roi_params, dict):
+            roi_params = {}
+
+        box_w = int(roi_params.get("box_w", 40))
+        box_h = int(roi_params.get("box_h", 40))
+        dist_agree = int(roi_params.get("marker_to_agree_dist", 600))
+        dist_disagree = int(roi_params.get("marker_to_disagree_dist", 750))
+
+        if scale != 1.0:
+            box_w = int(round(box_w * scale))
+            box_h = int(round(box_h * scale))
+            dist_agree = int(round(dist_agree * scale))
+            dist_disagree = int(round(dist_disagree * scale))
+
+        return box_w, box_h, dist_agree, dist_disagree
+
     def get_side_marker_params_dict(self, scale: float = 1.0):
         box_w, box_h, dist_agree, dist_disagree = self.get_side_marker_params(scale=scale)
         return {
@@ -66,17 +83,3 @@ class FormManager:
             "dist_agree": dist_agree,
             "dist_disagree": dist_disagree,
         }
-
-        roi_params = self.form_data.get("roi_params", {})
-        if not isinstance(roi_params, dict):
-            roi_params = {}
-        box_w = int(roi_params.get("box_w", 40))
-        box_h = int(roi_params.get("box_h", 40))
-        dist_agree = int(roi_params.get("marker_to_agree_dist", 600))
-        dist_disagree = int(roi_params.get("marker_to_disagree_dist", 750))
-        if scale != 1.0:
-            box_w = int(round(box_w * scale))
-            box_h = int(round(box_h * scale))
-            dist_agree = int(round(dist_agree * scale))
-            dist_disagree = int(round(dist_disagree * scale))
-        return box_w, box_h, dist_agree, dist_disagree
