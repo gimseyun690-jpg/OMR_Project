@@ -425,6 +425,8 @@ class ResultsRebuildInterface(QWidget):
 
 
 class SettingsInterface(QWidget):
+    PARTIAL_OFFSET_KEYS = ("exam_no", "birth", "name", "subject", "question")
+
     auto_open_changed = Signal(bool)
     auto_retry_changed = Signal(bool)
     error_popup_changed = Signal(bool)
@@ -433,6 +435,7 @@ class SettingsInterface(QWidget):
     dpi_changed = Signal(int)
     global_offset_x_changed = Signal(int)
     global_offset_y_changed = Signal(int)
+    partial_offset_changed = Signal(str, str, int)
     log_level_changed = Signal(str)
     locale_changed = Signal(str)
 
@@ -504,6 +507,40 @@ class SettingsInterface(QWidget):
         self.spin_offset_y.valueChanged.connect(self._on_global_offset_y_changed)
         offset_row.addWidget(self.spin_offset_y)
         offset_row.addStretch(1)
+        self.partial_offset_spins = {}
+        partial_group = HoverGroupBox("부분 오프셋")
+        partial_layout = QGridLayout(partial_group)
+        partial_layout.setContentsMargins(8, 8, 8, 8)
+        partial_layout.setHorizontalSpacing(8)
+        partial_layout.setVerticalSpacing(6)
+        partial_layout.addWidget(QLabel("항목"), 0, 0)
+        partial_layout.addWidget(QLabel("X"), 0, 1)
+        partial_layout.addWidget(QLabel("Y"), 0, 2)
+        partial_labels = {
+            "exam_no": "수험번호",
+            "birth": "생년월일",
+            "name": "이름",
+            "subject": "선택과목",
+            "question": "문항",
+        }
+        for row, key in enumerate(self.PARTIAL_OFFSET_KEYS, start=1):
+            partial_layout.addWidget(QLabel(partial_labels.get(key, key)), row, 0)
+            spin_x = QSpinBox()
+            spin_x.setRange(-2000, 2000)
+            spin_x.setSingleStep(1)
+            spin_x.valueChanged.connect(
+                lambda value, section=key: self._on_partial_offset_changed(section, "x", value)
+            )
+            partial_layout.addWidget(spin_x, row, 1)
+            self.partial_offset_spins[(key, "x")] = spin_x
+            spin_y = QSpinBox()
+            spin_y.setRange(-2000, 2000)
+            spin_y.setSingleStep(1)
+            spin_y.valueChanged.connect(
+                lambda value, section=key: self._on_partial_offset_changed(section, "y", value)
+            )
+            partial_layout.addWidget(spin_y, row, 2)
+            self.partial_offset_spins[(key, "y")] = spin_y
         dpi_row = QHBoxLayout()
         dpi_row.addWidget(QLabel("스캔 DPI"))
         self.spin_dpi = QSpinBox()
@@ -517,6 +554,7 @@ class SettingsInterface(QWidget):
         scan_layout.addWidget(self.chk_error_popup)
         scan_layout.addWidget(self.chk_auto_scale_dpi)
         scan_layout.addLayout(offset_row)
+        scan_layout.addWidget(partial_group)
         scan_layout.addLayout(dpi_row)
 
         # 디버그/로그
@@ -573,6 +611,13 @@ class SettingsInterface(QWidget):
         self.spin_dpi.setValue(self._settings.value("scan/dpi", 150, type=int))
         self.spin_offset_x.setValue(self._settings.value("scan/global_offset_x", 0, type=int))
         self.spin_offset_y.setValue(self._settings.value("scan/global_offset_y", 0, type=int))
+        for section in self.PARTIAL_OFFSET_KEYS:
+            for axis in ("x", "y"):
+                spin = self.partial_offset_spins.get((section, axis))
+                if spin is None:
+                    continue
+                key = f"scan/offset_{section}_{axis}"
+                spin.setValue(self._settings.value(key, 0, type=int))
         self.chk_debug_save.setChecked(self._settings.value("debug/save_on_error", False, type=bool))
 
         log_level = self._settings.value("log/level", "INFO", type=str)
@@ -633,6 +678,14 @@ class SettingsInterface(QWidget):
     def _on_global_offset_y_changed(self, value: int):
         self._settings.setValue("scan/global_offset_y", int(value))
         self.global_offset_y_changed.emit(int(value))
+
+    def _on_partial_offset_changed(self, section: str, axis: str, value: int):
+        sec = str(section).strip().lower()
+        ax = str(axis).strip().lower()
+        if sec not in self.PARTIAL_OFFSET_KEYS or ax not in ("x", "y"):
+            return
+        self._settings.setValue(f"scan/offset_{sec}_{ax}", int(value))
+        self.partial_offset_changed.emit(sec, ax, int(value))
 
     def _on_debug_save_changed(self, checked: bool):
         self._settings.setValue("debug/save_on_error", checked)
@@ -747,6 +800,7 @@ class OMRScannerApp(FluentWindow):
         self.settings_interface.dpi_changed.connect(self._apply_scan_dpi)
         self.settings_interface.global_offset_x_changed.connect(self._apply_global_offset_x)
         self.settings_interface.global_offset_y_changed.connect(self._apply_global_offset_y)
+        self.settings_interface.partial_offset_changed.connect(self._apply_partial_offset)
         self.settings_interface.log_level_changed.connect(self._apply_log_level)
 
     def open_file_setting(self):
@@ -841,14 +895,17 @@ class OMRScannerApp(FluentWindow):
     def _on_home_select_exam(self):
         self._lock_navigation({"홈", "스캔 판독", "시험 관리"})
         self.scan_interface.scanner_view.pipeline.set_candidate_enabled(True)
+        self.scan_interface.scanner_view.error_editor_profile = "score"
 
     def _on_home_select_church(self):
         self._lock_navigation({"홈", "스캔 판독", "교회 선거"})
         self.scan_interface.scanner_view.pipeline.set_candidate_enabled(False)
+        self.scan_interface.scanner_view.error_editor_profile = "church"
 
     def _on_home_select_rebuild(self):
         self._lock_navigation({"홈", "스캔 판독", "재개발 총회"})
         self.scan_interface.scanner_view.pipeline.set_candidate_enabled(False)
+        self.scan_interface.scanner_view.error_editor_profile = "rebuild"
 
     def _apply_saved_settings(self):
         self._apply_auto_retry(self._settings.value("scan/auto_retry", False, type=bool))
@@ -858,6 +915,10 @@ class OMRScannerApp(FluentWindow):
         self._apply_scan_dpi(self._settings.value("scan/dpi", 150, type=int))
         self._apply_global_offset_x(self._settings.value("scan/global_offset_x", 0, type=int))
         self._apply_global_offset_y(self._settings.value("scan/global_offset_y", 0, type=int))
+        for section in SettingsInterface.PARTIAL_OFFSET_KEYS:
+            for axis in ("x", "y"):
+                key = f"scan/offset_{section}_{axis}"
+                self._apply_partial_offset(section, axis, self._settings.value(key, 0, type=int))
         self._apply_log_level(self._settings.value("log/level", "INFO", type=str))
 
     def _apply_auto_retry(self, enabled: bool):
@@ -894,6 +955,16 @@ class OMRScannerApp(FluentWindow):
         view = self.scan_interface.scanner_view
         if hasattr(view, "pipeline"):
             view.pipeline.engine.configure(global_offset_y=int(value))
+
+    def _apply_partial_offset(self, section: str, axis: str, value: int):
+        sec = str(section).strip().lower()
+        ax = str(axis).strip().lower()
+        if sec not in SettingsInterface.PARTIAL_OFFSET_KEYS or ax not in ("x", "y"):
+            return
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            kwargs = {f"{sec}_offset_{ax}": int(value)}
+            view.pipeline.engine.configure(**kwargs)
 
     def _apply_log_level(self, level: str):
         import logging

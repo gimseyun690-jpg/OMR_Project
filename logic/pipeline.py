@@ -56,6 +56,9 @@ class ScanPipeline:
                 # ✅ JSON에서 직접 파라미터 적용
                 if isinstance(self.form_data, dict):
                     omr = self.form_data.get("omr", {}) or {}
+                    marker_detection = self.form_data.get("marker_detection", {})
+                    if not isinstance(marker_detection, dict):
+                        marker_detection = {}
 
                     # 전처리(adaptiveThreshold) 파라미터 (없으면 기본 유지)
                     block_size = omr.get("block_size")  # JSON에 없으면 None -> 기본 15 유지
@@ -66,12 +69,37 @@ class ScanPipeline:
 
                     # 사이드 마커 검출 threshold
                     marker_thresh = omr.get("threshold", 120)
+                    section_offsets = self.form_data.get("section_offsets", {})
+                    if not isinstance(section_offsets, dict):
+                        section_offsets = {}
+                    exam_no_offset = self.form_data.get(
+                        "exam_no_offset", section_offsets.get("exam_no_offset", 0.0)
+                    )
+                    birth_offset = self.form_data.get(
+                        "birth_offset", section_offsets.get("birth_offset", 0.0)
+                    )
+                    name_offset = self.form_data.get(
+                        "name_offset", section_offsets.get("name_offset", 0.0)
+                    )
+                    subject_offset = self.form_data.get(
+                        "subject_offset", section_offsets.get("subject_offset", 0.0)
+                    )
+                    questions_offset = self.form_data.get(
+                        "questions_offset",
+                        section_offsets.get("questions_offset", section_offsets.get("question_offset", 0.0)),
+                    )
 
                     self.engine.configure(
                         block_size=block_size,
                         pixel_ratio=pixel_ratio,
                         marker_thresh=marker_thresh,
                         C=C,
+                        marker_detection=marker_detection,
+                        exam_no_offset=exam_no_offset,
+                        birth_offset=birth_offset,
+                        name_offset=name_offset,
+                        subject_offset=subject_offset,
+                        questions_offset=questions_offset,
                     )
 
             except Exception as e:
@@ -167,6 +195,7 @@ class ScanPipeline:
         try:
             # 좌표 스케일링 팩터 계산 (여기는 정상)
             scale = self._get_scale_factor()
+            analysis_img = aligned_img
 
             # [CASE A] JSON 폼이 선택된 경우
             if isinstance(self.form_data, dict):
@@ -174,6 +203,9 @@ class ScanPipeline:
                 layout_mode = self.form_manager.get_layout_mode()
 
                 if self._is_new_marker_schema():
+                    # Top/side marker forms are more stable when marker detection runs
+                    # on the original image (avoid extra blur from pre-resize stage).
+                    analysis_img = img
                     questions = (
                         self.engine.parse_config(self.form_data)
                         if "question_groups" in self.form_data
@@ -183,7 +215,7 @@ class ScanPipeline:
                     marker_location = self.form_data.get("marker_location", "left")
 
                     status, results, debug_img, error_reason = self.engine.analyze_marker_questions(
-                        aligned_img,
+                        analysis_img,
                         questions,
                         question_layout,
                         scale=scale,
@@ -192,6 +224,7 @@ class ScanPipeline:
                     status_code = self._status_to_code(status)
 
                 elif layout_mode == "side_marker":
+                    analysis_img = img
                     # [수정] FormManager 함수 대신, JSON 데이터에서 직접 꺼내기 (안전한 방법)
                     questions = (
                         self.engine.parse_config(self.form_data)
@@ -215,11 +248,12 @@ class ScanPipeline:
                     
                     # 엔진 호출 (scale 인자 필수 전달!)
                     status, results, debug_img, error_reason = self.engine.analyze_side_marker_sheet(
-                        aligned_img, questions, roi_params, scale=scale, marker_location=marker_location
+                        analysis_img, questions, roi_params, scale=scale, marker_location=marker_location
                     )
                     status_code = self._status_to_code(status)
 
                 elif layout_mode == "timing_mark":
+                    analysis_img = img
                     timing_params = self.form_data.get("timing_mark", {}) if isinstance(self.form_data, dict) else {}
                     left_ratio = float(timing_params.get("left_ratio", 0.08))
                     x_offset_ratio = float(timing_params.get("x_offset_ratio", 0.3))
@@ -228,7 +262,7 @@ class ScanPipeline:
                     pixel_ratio = float(timing_params.get("pixel_ratio", self.engine.pixel_threshold))
 
                     aligned_img, rows, anchor_x, xs_list = self.engine.find_timing_marks_aligned(
-                        aligned_img, left_ratio=left_ratio
+                        analysis_img, left_ratio=left_ratio
                     )
                     if not rows:
                         status_code = "ERR"
@@ -271,26 +305,37 @@ class ScanPipeline:
                 status_code = self._status_to_code(status)
 
             # 4. 수험정보 판독 (옵션)
-            if self.candidate_enabled and status_code == "OK": # 마킹 오류나면 수험번호 볼 필요 없음
+            # Always run when enabled so candidate ROI/debug remains visible
+            # even if objective answers contain errors.
+            if self.candidate_enabled:
                 if isinstance(self.form_data, dict) and "fields" in self.form_data:
                     c_ok, c_info, c_debug = self.engine.analyze_custom_fields(
-                        aligned_img, self.form_data.get("fields", []), scale
+                        analysis_img, self.form_data.get("fields", []), scale
                     )
                     candidate_info = c_info
 
                     # 디버그 이미지 합치기 (옵션)
                     if c_debug is not None:
-                        debug_img = cv2.addWeighted(debug_img, 0.7, c_debug, 0.3, 0)
+                        # Candidate ROI overlay should stay clearly visible.
+                        if debug_img is None:
+                            debug_img = c_debug.copy()
+                        elif debug_img.shape == c_debug.shape:
+                            mask = np.any(c_debug != 0, axis=2)
+                            if np.any(mask):
+                                debug_img[mask] = c_debug[mask]
+                        else:
+                            debug_img = cv2.add(debug_img, c_debug)
 
                     if not c_ok:
-                        status_code = "ERR"
-                        error_reason = "CANDIDATE"
+                        if status_code == "OK":
+                            status_code = "ERR"
+                        if not error_reason:
+                            error_reason = "CANDIDATE"
                 else:
                     # [개선] Engine으로 로직 이관
                     cand_config = self.form_data.get("candidate_fields") if isinstance(self.form_data, dict) else None
                     if cand_config:
-                         # Engine에 analyze_candidate_info 메서드 구현 필요
-                        c_ok, c_info, c_debug = self.engine.analyze_candidate_info(aligned_img, cand_config, scale)
+                        c_ok, c_info, c_debug = self.engine.analyze_candidate_info(analysis_img, cand_config, scale)
                         candidate_info = c_info
                         
                         # 디버그 이미지 합치기 (옵션)
@@ -298,8 +343,10 @@ class ScanPipeline:
                             debug_img = cv2.addWeighted(debug_img, 0.7, c_debug, 0.3, 0)
 
                         if not c_ok:
-                            status_code = "ERR"
-                            error_reason = "CANDIDATE"
+                            if status_code == "OK":
+                                status_code = "ERR"
+                            if not error_reason:
+                                error_reason = "CANDIDATE"
 
         except Exception as e:
             print(f"Pipeline Error: {e}")

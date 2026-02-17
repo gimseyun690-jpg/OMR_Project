@@ -36,6 +36,7 @@ class ScannerReadingView(QWidget, UiSetupMixin, GridSyncMixin, ReviewFlowMixin, 
         self.last_scan_params = None
         self.last_error_code = ""
         self.show_error_popups = True
+        self.error_editor_profile = "church"
         self.current_summary_row = None
         self.session_start_room_text = None
         self._summary_refresh_timer = QTimer(self)

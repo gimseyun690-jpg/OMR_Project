@@ -5,7 +5,9 @@ import cv2
 import numpy as np
 from PySide2.QtCore import Qt
 from PySide2.QtWidgets import QMessageBox
-from ui.scanner.popups.error_editor import ErrorCorrectionDialog
+from ui.scanner.popups.error_editor_score import ScoreErrorCorrectionDialog
+from ui.scanner.popups.error_editor_church import ChurchErrorCorrectionDialog
+from ui.scanner.popups.error_editor_rebuild import RebuildErrorCorrectionDialog
 from logic.services.tasks.summary_tasks import ReviewSummaryTask
 
 
@@ -129,7 +131,7 @@ class ReviewFlowMixin:
             except Exception as e:
                 print(f"[REVIEW] debug overlay 실패: {e}")
 
-            dlg = ErrorCorrectionDialog(self, debug_img, scan_results, image_path)
+            dlg = self._create_error_editor_dialog(debug_img, scan_results, image_path)
             session_total = max(
                 0,
                 int(getattr(self, "session_end_read_num", 0)) - int(getattr(self, "session_start_read_num", 1)) + 1,
@@ -208,6 +210,24 @@ class ReviewFlowMixin:
 
             parsed.append({"q_num": i + 1, "marked": marked, "status": status})
         return parsed
+
+    def _resolve_error_editor_profile(self) -> str:
+        profile = str(getattr(self, "error_editor_profile", "")).strip().lower()
+        if profile in ("score", "church", "rebuild"):
+            return profile
+        if hasattr(self, "pipeline") and bool(getattr(self.pipeline, "candidate_enabled", False)):
+            return "score"
+        return "church"
+
+    def _create_error_editor_dialog(self, debug_img, scan_results, image_path):
+        profile = self._resolve_error_editor_profile()
+        if profile == "score":
+            dialog_cls = ScoreErrorCorrectionDialog
+        elif profile == "rebuild":
+            dialog_cls = RebuildErrorCorrectionDialog
+        else:
+            dialog_cls = ChurchErrorCorrectionDialog
+        return dialog_cls(self, debug_img, scan_results, image_path)
 
     def _blend_custom_fields_debug(self, debug_img, aligned_img, scale: float):
         if debug_img is None or aligned_img is None:
@@ -345,7 +365,7 @@ class ReviewFlowMixin:
         except Exception as e:
             print(f"[REVIEW] debug overlay 실패: {e}")
 
-        dlg = ErrorCorrectionDialog(self, debug_img, scan_results, image_path)
+        dlg = self._create_error_editor_dialog(debug_img, scan_results, image_path)
         dlg.lbl_idx.setText(str(read_num))
         dlg.exec_()
 

@@ -20,7 +20,7 @@ def _to_short_path(path: str) -> str:
         buffer = ctypes.create_unicode_buffer(buf_size)
         out_len = ctypes.windll.kernel32.GetShortPathNameW(path, buffer, buf_size)
         if out_len > 0:
-            return buffer.value
+            return buffer.value 
     except Exception:
         pass
     return path
