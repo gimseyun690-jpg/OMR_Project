@@ -27,27 +27,37 @@ class ImageProcessor:
             self.c_value = int(c_value)
 
     def preprocess(self, img: Optional[np.ndarray]) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """
+        [Final] Red channel high-contrast pipeline.
+        Removes red form lines while preserving dark pencil/pen marks.
+        """
         if img is None:
             return None, None
         work_img = img.copy()
 
-        if len(work_img.shape) == 2:
-            img_gray = work_img
-        else:
-            try:
-                _, _, r = cv2.split(work_img)
-                img_gray = r
-            except Exception:
-                img_gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
+        if len(work_img.shape) == 3:
+            # 1) Use red channel only.
+            red_channel = work_img[:, :, 2]
 
+            # 2) Hard cutoff: bright pixels (paper + red print) -> white.
+            contrast_img = red_channel.copy()
+            contrast_img[contrast_img > 10] = 255
+            img_gray = contrast_img
+        else:
+            # Grayscale input fallback.
+            img_gray = cv2.add(work_img, 30)
+
+        # 3) Binarization (fixed block_size=15, C=5).
         binary_img = cv2.adaptiveThreshold(
             img_gray,
             255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV,
-            self.block_size,
-            self.c_value,
+            15,
+            5,
         )
+
+        # 4) Small-noise cleanup.
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         processed_img = cv2.morphologyEx(binary_img, cv2.MORPH_OPEN, kernel, iterations=1)
         return work_img, processed_img
@@ -97,6 +107,62 @@ class ImageProcessor:
         fill = float(cv2.countNonZero(roi)) / area
         return fill, (rx, ry, rw, rh)
 
+    def roi_weighted_score(
+        self,
+        processed_img: Optional[np.ndarray],
+        x: int,
+        y: int,
+        w: int,
+        h: int,
+        inner_ratio: float = 0.18,
+        center_ratio: float = 0.55,
+        center_weight: float = 0.72,
+    ) -> Tuple[
+        Optional[float],
+        Optional[float],
+        Optional[float],
+        Optional[Tuple[int, int, int, int]],
+        Optional[Tuple[int, int, int, int]],
+    ]:
+        clamped = self.clamp_roi(processed_img, x, y, w, h)
+        if clamped is None:
+            return None, None, None, None, None
+        raw_ratio, eval_roi = self.roi_fill_ratio(processed_img, x, y, w, h, inner_ratio=inner_ratio)
+        if raw_ratio is None or eval_roi is None:
+            return None, None, None, clamped, eval_roi
+
+        ex, ey, ew, eh = eval_roi
+        roi = processed_img[ey : ey + eh, ex : ex + ew]
+        if roi is None or roi.size == 0:
+            return None, None, None, clamped, eval_roi
+
+        cr = float(center_ratio)
+        if not np.isfinite(cr):
+            cr = 0.55
+        cr = float(np.clip(cr, 0.25, 0.90))
+        cw = float(center_weight)
+        if not np.isfinite(cw):
+            cw = 0.72
+        cw = float(np.clip(cw, 0.0, 1.0))
+
+        cxm = int(round((1.0 - cr) * float(ew) * 0.5))
+        cym = int(round((1.0 - cr) * float(eh) * 0.5))
+        cx1 = max(0, cxm)
+        cy1 = max(0, cym)
+        cx2 = min(ew, ew - cxm)
+        cy2 = min(eh, eh - cym)
+        if cx2 <= cx1 or cy2 <= cy1:
+            center_roi = roi
+            center_rect = eval_roi
+        else:
+            center_roi = roi[cy1:cy2, cx1:cx2]
+            center_rect = (ex + cx1, ey + cy1, cx2 - cx1, cy2 - cy1)
+        c_area = float(center_roi.shape[0] * center_roi.shape[1])
+        center_fill = float(cv2.countNonZero(center_roi)) / c_area if c_area > 0 else float(raw_ratio)
+
+        weighted = ((1.0 - cw) * float(raw_ratio)) + (cw * float(center_fill))
+        return float(weighted), float(raw_ratio), float(center_fill), clamped, center_rect
+
     def check_roi(
         self,
         processed_img: Optional[np.ndarray],
@@ -107,9 +173,16 @@ class ImageProcessor:
         threshold: float,
     ) -> Tuple[bool, float, Optional[Tuple[int, int, int, int]], Optional[Tuple[int, int, int, int]]]:
         clamped = self.clamp_roi(processed_img, x, y, w, h)
+        ratio, eval_roi = self.roi_fill_ratio(
+            processed_img,
+            x,
+            y,
+            w,
+            h,
+            inner_ratio=0.18,
+        )
         if clamped is None:
             return False, 0.0, None, None
-        ratio, eval_roi = self.roi_fill_ratio(processed_img, x, y, w, h)
         if ratio is None:
             return False, 0.0, clamped, eval_roi
         return bool(float(ratio) > float(threshold)), float(ratio), clamped, eval_roi
@@ -294,13 +367,14 @@ class OMRScanner:
         if not np.isfinite(scale_value) or scale_value <= 0.0:
             scale_value = 1.0
 
+        # Additional axis factors over base scale.
         x_factor = 1.0
         y_factor = 1.0
         img_h, img_w = work_img.shape[:2]
 
-        # Keep the same scaling policy as analyze_marker_questions:
-        # - apply axis scaling only when explicit metadata exists in config
-        # - otherwise keep base factor (avoid implicit over-correction)
+        # Layout fallback: current image size over configured layout size.
+        # When marker normalization rotates the working image (e.g. top/bottom layouts),
+        # compare against the orientation that best matches the current canvas.
         try:
             layout_w = float(config.get("width", config.get("layout_width", 0.0)))
         except Exception:
@@ -310,59 +384,156 @@ class OMRScanner:
         except Exception:
             layout_h = 0.0
 
-        if layout_w > 0.0:
-            expected_w = float(layout_w) * float(scale_value)
-            if expected_w > 1e-6:
-                x_factor = float(np.clip(float(img_w) / expected_w, 0.92, 1.08))
-        if layout_h > 0.0:
-            expected_h = float(layout_h) * float(scale_value)
-            if expected_h > 1e-6:
-                y_factor = float(np.clip(float(img_h) / expected_h, 0.92, 1.08))
+        if layout_w > 0.0 and layout_h > 0.0:
+            exp_w_a = float(layout_w) * float(scale_value)
+            exp_h_a = float(layout_h) * float(scale_value)
+            exp_w_b = float(layout_h) * float(scale_value)
+            exp_h_b = float(layout_w) * float(scale_value)
+
+            if exp_w_a > 1e-6 and exp_h_a > 1e-6 and exp_w_b > 1e-6 and exp_h_b > 1e-6:
+                err_a = (abs(float(img_w) - exp_w_a) / exp_w_a) + (abs(float(img_h) - exp_h_a) / exp_h_a)
+                err_b = (abs(float(img_w) - exp_w_b) / exp_w_b) + (abs(float(img_h) - exp_h_b) / exp_h_b)
+                if err_b < err_a:
+                    expected_w = exp_w_b
+                    expected_h = exp_h_b
+                else:
+                    expected_w = exp_w_a
+                    expected_h = exp_h_a
+                x_factor = float(img_w) / float(expected_w)
+                y_factor = float(img_h) / float(expected_h)
+        else:
+            if layout_w > 0.0:
+                expected_w = float(layout_w) * float(scale_value)
+                if expected_w > 1e-6:
+                    x_factor = float(img_w) / float(expected_w)
+            if layout_h > 0.0:
+                expected_h = float(layout_h) * float(scale_value)
+                if expected_h > 1e-6:
+                    y_factor = float(img_h) / float(expected_h)
 
         loc = str(marker_location or "left").strip().lower()
         ordered = list(markers or [])
         if len(ordered) >= 2:
-            if loc in ("top", "bottom"):
-                ordered = sorted(ordered, key=lambda m: int(m.cx))
-                measured_span = abs(float(ordered[-1].cx) - float(ordered[0].cx))
-                pitch_key = "marker_dx"
-            else:
-                ordered = sorted(ordered, key=lambda m: int(m.cy))
-                measured_span = abs(float(ordered[-1].cy) - float(ordered[0].cy))
-                pitch_key = "marker_dy"
+            ordered_x = sorted(ordered, key=lambda m: int(m.cx))
+            ordered_y = sorted(ordered, key=lambda m: int(m.cy))
+            measured_span_x = abs(float(ordered_x[-1].cx) - float(ordered_x[0].cx))
+            measured_span_y = abs(float(ordered_y[-1].cy) - float(ordered_y[0].cy))
 
-            try:
-                expected_span = float(config.get("expected_marker_span", 0.0))
-            except Exception:
-                expected_span = 0.0
-            if expected_span <= 0.0:
+            # Dynamic axis classification (no hard orientation assumption).
+            has_top_bottom = loc in ("top", "bottom")
+            has_left_right = loc in ("left", "right")
+            if measured_span_x > (measured_span_y * 1.25):
+                has_top_bottom = True
+                has_left_right = False
+            elif measured_span_y > (measured_span_x * 1.25):
+                has_left_right = True
+                has_top_bottom = False
+            elif not has_top_bottom and not has_left_right:
+                has_top_bottom = measured_span_x >= measured_span_y
+                has_left_right = not has_top_bottom
+
+            if has_top_bottom and measured_span_x > 1e-6:
                 try:
-                    pitch = float(config.get(pitch_key, config.get("marker_pitch", 0.0)))
+                    expected_span_x = float(
+                        config.get(
+                            "expected_marker_span_x",
+                            config.get("expected_marker_span", 0.0),
+                        )
+                    )
                 except Exception:
-                    pitch = 0.0
-                if pitch > 0.0:
-                    expected_span = float(pitch) * float(max(1, len(ordered) - 1))
-            expected_span = float(expected_span) * float(scale_value)
-            if expected_span > 1e-6 and measured_span > 1e-6:
-                span_factor = float(np.clip(float(measured_span) / float(expected_span), 0.92, 1.08))
-                if loc in ("top", "bottom"):
-                    x_factor = span_factor
-                else:
-                    y_factor = span_factor
+                    expected_span_x = 0.0
+                if expected_span_x <= 0.0:
+                    try:
+                        marker_dx = float(config.get("marker_dx", config.get("marker_pitch", 0.0)))
+                    except Exception:
+                        marker_dx = 0.0
+                    if marker_dx > 0.0:
+                        expected_span_x = float(marker_dx) * float(max(1, len(ordered_x) - 1))
+                expected_span_x = float(expected_span_x) * float(scale_value)
+                if expected_span_x > 1e-6:
+                    x_factor = float(measured_span_x) / float(expected_span_x)
 
-        if len(ordered) >= 1 and loc in ("top", "bottom"):
-            try:
-                top_cfg = float(config.get("top_marker_y", config.get("anchor_top_y", 0.0)))
-            except Exception:
-                top_cfg = 0.0
-            if float(layout_h) > float(top_cfg) and float(top_cfg) > 0.0:
-                expected_span_y = (float(layout_h) - float(top_cfg)) * float(scale_value)
-                current_top_y = float(np.mean(np.asarray([float(m.cy) for m in ordered], dtype=np.float32)))
-                measured_span_y = float(img_h) - float(current_top_y)
-                if expected_span_y > 1e-6 and measured_span_y > 1e-6:
-                    y_factor = float(np.clip(float(measured_span_y) / float(expected_span_y), 0.92, 1.08))
+            if has_left_right and measured_span_y > 1e-6:
+                try:
+                    expected_span_y = float(
+                        config.get(
+                            "expected_marker_span_y",
+                            config.get("expected_marker_span", 0.0),
+                        )
+                    )
+                except Exception:
+                    expected_span_y = 0.0
+                if expected_span_y <= 0.0:
+                    try:
+                        marker_dy = float(config.get("marker_dy", config.get("marker_pitch", 0.0)))
+                    except Exception:
+                        marker_dy = 0.0
+                    if marker_dy > 0.0:
+                        expected_span_y = float(marker_dy) * float(max(1, len(ordered_y) - 1))
+                expected_span_y = float(expected_span_y) * float(scale_value)
+                if expected_span_y > 1e-6:
+                    y_factor = float(measured_span_y) / float(expected_span_y)
+
+        if not np.isfinite(x_factor) or x_factor <= 0.0:
+            x_factor = 1.0
+        if not np.isfinite(y_factor) or y_factor <= 0.0:
+            y_factor = 1.0
+        x_factor = float(np.clip(x_factor, 0.5, 1.5))
+        y_factor = float(np.clip(y_factor, 0.5, 1.5))
 
         return float(scale_value * x_factor), float(scale_value * y_factor)
+
+    @staticmethod
+    def _resolve_scaled_layout_canvas(
+        cfg: Optional[Dict[str, Any]],
+        img_w: int,
+        img_h: int,
+        base_scale: float,
+    ) -> Tuple[float, float]:
+        config = cfg if isinstance(cfg, dict) else {}
+        try:
+            layout_w = float(config.get("width", config.get("layout_width", 0.0)))
+        except Exception:
+            layout_w = 0.0
+        try:
+            layout_h = float(config.get("height", config.get("layout_height", 0.0)))
+        except Exception:
+            layout_h = 0.0
+        if layout_w <= 0.0 or layout_h <= 0.0:
+            return 0.0, 0.0
+
+        s = float(base_scale)
+        if not np.isfinite(s) or s <= 0.0:
+            s = 1.0
+
+        exp_w_a = float(layout_w) * s
+        exp_h_a = float(layout_h) * s
+        exp_w_b = float(layout_h) * s
+        exp_h_b = float(layout_w) * s
+        if exp_w_a <= 1e-6 or exp_h_a <= 1e-6 or exp_w_b <= 1e-6 or exp_h_b <= 1e-6:
+            return 0.0, 0.0
+
+        err_a = (abs(float(img_w) - exp_w_a) / exp_w_a) + (abs(float(img_h) - exp_h_a) / exp_h_a)
+        err_b = (abs(float(img_w) - exp_w_b) / exp_w_b) + (abs(float(img_h) - exp_h_b) / exp_h_b)
+        if err_b < err_a:
+            return float(exp_w_b), float(exp_h_b)
+        return float(exp_w_a), float(exp_h_a)
+
+    @staticmethod
+    def _vertical_page_gain(
+        anchor_y: float,
+        img_h: int,
+        expected_h_scaled: float,
+        expected_anchor_scaled: float = 0.0,
+    ) -> float:
+        expected_span = float(expected_h_scaled) - float(expected_anchor_scaled)
+        measured_span = float(img_h) - float(anchor_y)
+        if expected_span <= 1e-6 or measured_span <= 1e-6:
+            return 1.0
+        gain = float(measured_span) / float(expected_span)
+        if not np.isfinite(gain) or gain <= 0.0:
+            return 1.0
+        return float(np.clip(gain, 0.5, 1.5))
 
     @staticmethod
     def _required_marker_index_for_fields(fields: Sequence[Dict[str, Any]]) -> int:
@@ -428,42 +599,6 @@ class OMRScanner:
             return ordered
         return list(clusters[0])
 
-    @staticmethod
-    def _select_stable_marker_window(
-        marker_axis: Sequence[Marker],
-        axis_key: str,
-        required_count: int,
-    ) -> List[Marker]:
-        if not marker_axis:
-            return []
-        ordered = sorted(marker_axis, key=lambda m: int(getattr(m, axis_key, 0)))
-        target = int(required_count)
-        if target <= 0 or len(ordered) <= target:
-            return ordered
-
-        best_start = 0
-        best_score = 10**9
-        max_start = len(ordered) - target
-        for start in range(max_start + 1):
-            coords = np.asarray(
-                [int(getattr(m, axis_key, 0)) for m in ordered[start : start + target]],
-                dtype=np.float32,
-            )
-            gaps = np.diff(coords)
-            if gaps.size == 0:
-                score = 0.0
-            else:
-                med = float(np.median(gaps))
-                if med <= 1.0:
-                    continue
-                rel_std = float(np.std(gaps)) / med
-                outlier_penalty = float(np.sum(np.abs(gaps - med) > (0.45 * med)))
-                score = rel_std + (outlier_penalty * 0.6)
-            if score < best_score:
-                best_score = score
-                best_start = start
-        return list(ordered[best_start : best_start + target])
-
     def _check_roi(
         self,
         processed_img: Optional[np.ndarray],
@@ -519,15 +654,39 @@ class OMRScanner:
             return
 
     @staticmethod
-    def _fixed_row_linear_scale(cfg: Dict[str, Any]) -> float:
-        """Deterministic row scale: no pixel-hit optimization, config-only fallback."""
-        try:
-            value = float(cfg.get("row_linear_scale", 1.0))
-        except Exception:
-            value = 1.0
-        if not np.isfinite(value) or value <= 0.0:
-            value = 1.0
-        return float(np.clip(value, 0.85, 1.15))
+    def _indexed_axis_coord(
+        anchor: float,
+        axis_offset: float,
+        axis_step: float,
+        axis_index: int,
+        section_offset: float = 0.0,
+    ) -> int:
+        """Common linear index mapping: coord = anchor + offset + (index * step) + section_offset."""
+        return int(
+            round(
+                float(anchor)
+                + float(axis_offset)
+                + (float(axis_index) * float(axis_step))
+                + float(section_offset)
+            )
+        )
+
+    @staticmethod
+    def _markers_span_is_horizontal(markers: Sequence[Marker]) -> bool:
+        if len(markers) < 2:
+            return False
+        span_x = float(max(int(m.cx) for m in markers) - min(int(m.cx) for m in markers))
+        span_y = float(max(int(m.cy) for m in markers) - min(int(m.cy) for m in markers))
+        return span_x >= span_y
+
+    def _marker_anchor_y(self, markers: Sequence[Marker], marker: Marker, anchor_y_mode: str = "median") -> float:
+        mode = str(anchor_y_mode or "").strip().lower()
+        if mode == "median" and self._markers_span_is_horizontal(markers):
+            try:
+                return float(np.median(np.asarray([float(m.cy) for m in markers], dtype=np.float32)))
+            except Exception:
+                return float(marker.cy)
+        return float(marker.cy)
 
     def analyze_sheet_cv(
         self,
@@ -558,223 +717,6 @@ class OMRScanner:
             results.append(QuestionResult(q_num=int(q_idx + 1), marked=marked_indices, status=status))
 
         return ("오류" if has_error else "정상"), [r.as_dict() for r in results], debug_img
-
-    def find_timing_marks(self, image: Optional[np.ndarray], left_ratio: float = 0.08) -> Tuple[List[int], int, List[int]]:
-        if image is None:
-            return [], 0, []
-        img_h, img_w = image.shape[:2]
-        left_limit = int(img_w * float(left_ratio))
-
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        _, binary = cv2.threshold(gray, int(self.marker_detector.marker_thresh), 255, cv2.THRESH_BINARY_INV)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
-
-        contours_info = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contours = contours_info[0] if len(contours_info) == 2 else contours_info[1]
-        candidates: List[Tuple[int, int]] = []
-        min_area = img_w * img_h * 0.0001
-        max_area = img_w * img_h * 0.01
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < min_area or area > max_area:
-                continue
-            x, y, w, h = cv2.boundingRect(cnt)
-            if x > left_limit:
-                continue
-            ratio = float(w) / float(h) if h > 0 else 0.0
-            if not (0.6 <= ratio <= 1.6):
-                continue
-            hull = cv2.convexHull(cnt)
-            hull_area = cv2.contourArea(hull)
-            if hull_area <= 0:
-                continue
-            solidity = float(area) / float(hull_area)
-            if solidity < 0.85:
-                continue
-            candidates.append((int(x + (w // 2)), int(y + (h // 2))))
-
-        if not candidates:
-            return [], 0, []
-        candidates = sorted(candidates, key=lambda it: int(it[1]))
-        rows = [int(cy) for _, cy in candidates]
-        xs_list = [int(cx) for cx, _ in candidates]
-        anchor_x = int(np.median(xs_list)) if xs_list else 0
-        return rows, anchor_x, xs_list
-
-    def find_timing_marks_aligned(
-        self, image: Optional[np.ndarray], left_ratio: float = 0.08
-    ) -> Tuple[Optional[np.ndarray], List[int], int, List[int]]:
-        if image is None:
-            return None, [], 0, []
-        rows, anchor_x, xs_list = self.find_timing_marks(image, left_ratio=left_ratio)
-        if len(xs_list) >= 2 and abs(xs_list[-1] - xs_list[0]) > 1:
-            corrected = self.geometry_manager.deskew_from_rows(image, rows, xs_list)
-            if corrected is not None:
-                image = corrected
-            rows, anchor_x, xs_list = self.find_timing_marks(image, left_ratio=left_ratio)
-        return image, rows, anchor_x, xs_list
-
-    def read_answers(
-        self,
-        image: Optional[np.ndarray],
-        rows: Sequence[int],
-        anchor_x: int = 0,
-        x_offset_ratio: float = 0.3,
-        box_w_ratio: float = 0.04,
-        box_h_ratio: float = 0.02,
-        pixel_threshold: Optional[float] = None,
-    ) -> Tuple[List[bool], Optional[np.ndarray]]:
-        if image is None:
-            return [], None
-
-        work_img, processed_img = self.image_processor.preprocess(image)
-        debug_img = work_img.copy() if work_img is not None else None
-        if processed_img is None or not rows:
-            return [], debug_img
-
-        threshold = self.pixel_threshold if pixel_threshold is None else float(pixel_threshold)
-        img_h, img_w = processed_img.shape[:2]
-        box_w = max(1, int(img_w * float(box_w_ratio)))
-        box_h = max(1, int(img_h * float(box_h_ratio)))
-        x_offset = int(img_w * float(x_offset_ratio))
-
-        marks: List[bool] = []
-        for row_y in rows:
-            rx = int(anchor_x + x_offset)
-            ry = int(int(row_y) - (box_h // 2))
-            clamped = self.image_processor.clamp_roi(processed_img, rx, ry, box_w, box_h)
-            if clamped is None:
-                marks.append(False)
-                continue
-            x, y, w, h = clamped
-            roi = processed_img[y : y + h, x : x + w]
-            ratio = float(cv2.countNonZero(roi)) / float(w * h) if (w * h) > 0 else 0.0
-            is_marked = bool(ratio > threshold)
-            marks.append(is_marked)
-            if debug_img is not None:
-                color = (0, 255, 0) if is_marked else (0, 0, 255)
-                cv2.rectangle(debug_img, (x, y), (x + w, y + h), color, 1)
-        return marks, debug_img
-
-    def analyze_side_marker_sheet(
-        self,
-        original_img: Optional[np.ndarray],
-        questions: Sequence[Dict[str, Any]],
-        params: Dict[str, Any],
-        scale: float = 1.0,
-        marker_location: str = "left",
-    ) -> Tuple[str, List[Dict[str, Any]], Optional[np.ndarray], str]:
-        if original_img is None:
-            return "ERROR", [], None, "IMG_NONE"
-
-        try:
-            min_marker_count = 3
-            rotated_img, markers = self.marker_detector.normalize_orientation(
-                original_img,
-                expected_location=marker_location,
-                min_count=min_marker_count,
-            )
-            if rotated_img is None:
-                return "ERR", [], None, "IMG_NONE"
-
-            base_img = rotated_img
-            markers = self.marker_detector.find_markers(base_img, location=marker_location, min_count=min_marker_count)
-            if markers and len(markers) >= 5:
-                corrected = self.geometry_manager.deskew_by_markers(base_img, markers, marker_location)
-                if corrected is not None:
-                    base_img = corrected
-                    markers = self.marker_detector.find_markers(base_img, location=marker_location, min_count=min_marker_count)
-
-            work_img, processed_img = self.image_processor.preprocess(base_img)
-            if work_img is None or processed_img is None:
-                return "ERR", [], None, "PREPROCESS"
-            debug_img = work_img.copy()
-
-            markers = self.marker_detector.interpolate_missing_marks(markers)
-            if len(markers) < len(questions):
-                for m in markers:
-                    cv2.circle(debug_img, (int(m.cx), int(m.cy)), 5, (0, 0, 255), -1)
-                return "ERR", [], debug_img, "TIMING_MARK"
-
-            raw_dist_agree = params.get("dist_agree") or params.get("marker_to_agree_dist") or 100
-            raw_dist_disagree = params.get("dist_disagree") or params.get("marker_to_disagree_dist") or 200
-            if params.get("marker_to_disagree_dist"):
-                raw_dist_disagree = params.get("marker_to_disagree_dist")
-
-            box_w = int(int(params.get("box_w", 35)) * float(scale))
-            box_h = int(int(params.get("box_h", 35)) * float(scale))
-            dist_agree = int(float(raw_dist_agree) * float(scale))
-            dist_disagree = int(float(raw_dist_disagree) * float(scale))
-
-            _, img_w = work_img.shape[:2]
-            width_ratio = (float(img_w) / float(self.geometry_manager.width)) if self.geometry_manager.width > 0 else 1.0
-            width_ratio = float(np.clip(width_ratio, 0.90, 3.0))
-
-            is_horizontal = str(marker_location).strip().lower() in ("top", "bottom")
-            marks_by_axis = sorted(markers, key=lambda m: int(m.cx if is_horizontal else m.cy))
-
-            sheet_results: List[QuestionResult] = []
-            has_error = False
-            error_reason = ""
-            question_off_x, question_off_y = self._combined_offset("question")
-
-            for i, q in enumerate(questions):
-                if not isinstance(q, dict):
-                    continue
-                q_num = int(q.get("no", i + 1))
-                row_index = q.get("row_index", i)
-                q_y = q.get("y")
-
-                if row_index is not None and 0 <= int(row_index) < len(marks_by_axis):
-                    base_mark = marks_by_axis[int(row_index)]
-                elif q_y is not None:
-                    base_mark = min(marks_by_axis, key=lambda m: abs(int(m.cy) - int(q_y)))
-                else:
-                    if i >= len(marks_by_axis):
-                        sheet_results.append(QuestionResult(q_num=q_num, marked=[], status="마킹없음"))
-                        has_error = True
-                        continue
-                    base_mark = marks_by_axis[i]
-
-                base_cx = int(base_mark.cx)
-                base_cy = int(base_mark.cy)
-                start_y = int(base_cy - (box_h // 2) + question_off_y)
-                rois = [
-                    (
-                        int(base_cx + int(dist_agree * width_ratio) + question_off_x),
-                        int(start_y),
-                        int(max(1, int(box_w * width_ratio))),
-                        int(box_h),
-                    ),
-                    (
-                        int(base_cx + int(dist_disagree * width_ratio) + question_off_x),
-                        int(start_y),
-                        int(max(1, int(box_w * width_ratio))),
-                        int(box_h),
-                    ),
-                ]
-
-                marked_indices: List[int] = []
-                for r_idx, (rx, ry, rw, rh) in enumerate(rois):
-                    cv2.rectangle(debug_img, (rx, ry), (rx + rw, ry + rh), (255, 0, 0), 1)
-                    if self._check_roi(processed_img, rx, ry, rw, rh, debug_img, (0, 255, 0)):
-                        marked_indices.append(r_idx)
-
-                status = self._determine_status(marked_indices)
-                if status != "정상":
-                    has_error = True
-                    if not error_reason:
-                        error_reason = f"{status}(Q{q_num})"
-                    self._draw_error_box(debug_img, rois)
-
-                sheet_results.append(QuestionResult(q_num=q_num, marked=marked_indices, status=status))
-                cv2.circle(debug_img, (base_cx, base_cy), 3, (0, 0, 255), -1)
-
-            return ("ERR" if has_error else "OK"), [r.as_dict() for r in sheet_results], debug_img, error_reason
-        except Exception as exc:
-            logger.exception("[SideMarker] exception: %s", exc)
-            return "ERR", [], None, "EXCEPTION"
 
     def analyze_marker_questions(
         self,
@@ -865,13 +807,13 @@ class OMRScanner:
             if not prepared:
                 return "ERR", [], debug_img, "TIMING_MARK"
 
-            scale_factor = 1.0
+            col_anchor_map: Dict[int, Marker] = {}
+            row_anchor_map: Dict[int, Marker] = {}
             if is_horizontal_target:
                 needed_cols = sorted({int(item["col_index"]) for item in prepared})
                 if not needed_cols or needed_cols[0] < 0:
                     return "ERR", [], debug_img, "TIMING_MARK"
 
-                col_anchor_map: Dict[int, Marker] = {}
                 fixed_anchor_mode = self._to_bool(layout.get("fixed_anchor_mode", False), False)
                 raw_anchor_indices = layout.get("column_anchor_indices", [])
                 anchor_index_base = int(layout.get("column_anchor_index_base", 1))
@@ -914,210 +856,69 @@ class OMRScanner:
                                 cy=int(med_y),
                                 interpolated=bool(getattr(m, "interpolated", False)),
                             )
-
-                first_col = int(needed_cols[0])
-                last_col = int(needed_cols[-1])
-                measured_span = abs(float(col_anchor_map[last_col].cx) - float(col_anchor_map[first_col].cx))
-                span_units = max(0, last_col - first_col)
-
-                expected_span = 0.0
-                expected_marker_span_cfg = layout.get("expected_marker_span", 0)
-                try:
-                    span_cfg_value = float(expected_marker_span_cfg)
-                except Exception:
-                    span_cfg_value = 0.0
-                if span_cfg_value > 0.0:
-                    expected_span = span_cfg_value * float(scale)
-                else:
-                    step_cfg_raw = layout.get("marker_dx", layout.get("marker_pitch", 0))
-                    try:
-                        step_cfg_value = float(step_cfg_raw)
-                    except Exception:
-                        step_cfg_value = 0.0
-                    if step_cfg_value > 0.0 and span_units > 0:
-                        expected_span = float(step_cfg_value) * float(scale) * float(span_units)
-
-                if expected_span > 1e-6 and measured_span > 1e-6:
-                    scale_factor = float(measured_span) / float(expected_span)
-                    if not np.isfinite(scale_factor) or scale_factor <= 0.0:
-                        scale_factor = 1.0
             else:
                 needed_rows = sorted({int(item["row_index"]) for item in prepared})
                 if not needed_rows or needed_rows[0] < 0:
                     return "ERR", [], debug_img, "TIMING_MARK"
 
-                row_anchor_map: Dict[int, Marker] = {}
                 for row_idx in needed_rows:
                     idx0 = (marker_start_index - 1) + row_idx
                     if not (0 <= idx0 < len(marks_by_y)):
                         return "ERR", [], debug_img, "TIMING_MARK"
                     row_anchor_map[row_idx] = marks_by_y[idx0]
-                first_row = int(needed_rows[0])
-                last_row = int(needed_rows[-1])
-                measured_span = abs(float(row_anchor_map[last_row].cy) - float(row_anchor_map[first_row].cy))
-                span_units = max(0, last_row - first_row)
-
-                expected_span = 0.0
-                expected_marker_span_cfg = layout.get("expected_marker_span", 0)
-                try:
-                    span_cfg_value = float(expected_marker_span_cfg)
-                except Exception:
-                    span_cfg_value = 0.0
-                if span_cfg_value > 0.0:
-                    expected_span = span_cfg_value * float(scale)
-                else:
-                    step_cfg_raw = layout.get("marker_dy", layout.get("marker_pitch", 0))
-                    try:
-                        step_cfg_value = float(step_cfg_raw)
-                    except Exception:
-                        step_cfg_value = 0.0
-                    if step_cfg_value > 0.0 and span_units > 0:
-                        expected_span = float(step_cfg_value) * float(scale) * float(span_units)
-
-                if expected_span > 1e-6 and measured_span > 1e-6:
-                    scale_factor = float(measured_span) / float(expected_span)
-                    if not np.isfinite(scale_factor) or scale_factor <= 0.0:
-                        scale_factor = 1.0
-
-            # Axis-specific scaling uses explicit layout metadata only.
-            # When metadata is absent, keep the base factor to avoid over-correction.
-            x_scale_factor = float(scale_factor)
-            y_scale_factor = float(scale_factor)
-
-            try:
-                layout_w_cfg = float(layout.get("width", layout.get("layout_width", 0)))
-            except Exception:
-                layout_w_cfg = 0.0
-            if layout_w_cfg > 0.0:
-                expected_w = layout_w_cfg * float(scale)
-                measured_w = float(work_img.shape[1])
-                if expected_w > 1e-6 and measured_w > 1e-6:
-                    x_scale = float(measured_w) / float(expected_w)
-                    if np.isfinite(x_scale) and x_scale > 0.0:
-                        x_scale_factor = x_scale
-
-            if is_horizontal_target:
-                try:
-                    layout_h_cfg = float(layout.get("height", layout.get("layout_height", 0)))
-                except Exception:
-                    layout_h_cfg = 0.0
-                try:
-                    layout_top_y_cfg = float(layout.get("top_marker_y", layout.get("anchor_top_y", 0)))
-                except Exception:
-                    layout_top_y_cfg = 0.0
-                if layout_h_cfg > layout_top_y_cfg and layout_top_y_cfg > 0.0:
-                    current_top_y = float(np.mean(np.asarray([float(m.cy) for m in marks_by_x], dtype=np.float32)))
-                    current_height = float(work_img.shape[0])
-                    measured_span_y = current_height - current_top_y
-                    expected_span_y = (layout_h_cfg - layout_top_y_cfg) * float(scale)
-                    if expected_span_y > 1e-6 and measured_span_y > 1e-6:
-                        y_scale = float(measured_span_y) / float(expected_span_y)
-                        if np.isfinite(y_scale) and y_scale > 0.0:
-                            y_scale_factor = y_scale
-            else:
-                try:
-                    layout_h_cfg = float(layout.get("height", layout.get("layout_height", 0)))
-                except Exception:
-                    layout_h_cfg = 0.0
-                if layout_h_cfg > 0.0:
-                    expected_h = layout_h_cfg * float(scale)
-                    measured_h = float(work_img.shape[0])
-                    if expected_h > 1e-6 and measured_h > 1e-6:
-                        y_scale = float(measured_h) / float(expected_h)
-                        if np.isfinite(y_scale) and y_scale > 0.0:
-                            y_scale_factor = y_scale
-
-            x_scale_factor = float(np.clip(x_scale_factor, 0.92, 1.08))
-            y_scale_factor = float(np.clip(y_scale_factor, 0.92, 1.08))
-
-            geom_scale_x = float(scale) * float(x_scale_factor)
-            geom_scale_y = float(scale) * float(y_scale_factor)
+            marker_axis = marks_by_x if is_horizontal_target else marks_by_y
+            geom_scale_x, geom_scale_y = self._compute_global_scale_factors(
+                work_img,
+                marker_axis,
+                marker_location,
+                scale,
+                cfg=layout,
+            )
 
             # Unified geometry:
             # target = anchor + (config_offset * global_scale) + (config_offset * section_offset)
             x_offset = self._scaled_config_offset("question", float(layout.get("x_offset", 600)), geom_scale_x)
-            choice_dx = self._scaled_config_offset("question", float(layout.get("choice_dx", 70)), geom_scale_x)
+            raw_choice_dx = float(layout.get("choice_dx", 70))
+            effective_choice_dx = float(raw_choice_dx) * float(geom_scale_x)
             box_w = max(1, int(round(float(layout.get("box_w", 40)) * geom_scale_x)))
             box_h = max(1, int(round(float(layout.get("box_h", 40)) * geom_scale_y)))
             row_offset_y = self._scaled_config_offset("question", float(layout.get("row_offset_y", 0)), geom_scale_y)
             row_start_y = self._scaled_config_offset("question", float(layout.get("row_start_y", 360)), geom_scale_y)
-            row_dy = self._scaled_config_offset("question", float(layout.get("row_dy", 70)), geom_scale_y)
+            raw_row_dy = float(layout.get("row_dy", 70))
+            effective_row_dy = float(raw_row_dy) * float(geom_scale_y)
             question_off_x, question_off_y = self._combined_offset("question")
+            expected_w_scaled, expected_h_scaled = self._resolve_scaled_layout_canvas(
+                layout,
+                img_w=int(work_img.shape[1]),
+                img_h=int(work_img.shape[0]),
+                base_scale=float(scale),
+            )
+            try:
+                expected_anchor_y = float(
+                    layout.get(
+                        "expected_anchor_y",
+                        layout.get("top_marker_y", layout.get("anchor_top_y", 0.0)),
+                    )
+                )
+            except Exception:
+                expected_anchor_y = 0.0
+            expected_anchor_y_scaled = float(expected_anchor_y) * float(geom_scale_y)
+            use_page_end_y_correction = self._to_bool(
+                layout.get("page_end_y_correction", is_horizontal_target),
+                is_horizontal_target,
+            )
+            try:
+                mark_threshold = float(layout.get("mark_threshold", self.pixel_threshold))
+            except Exception:
+                mark_threshold = float(self.pixel_threshold)
+            if (not np.isfinite(mark_threshold)) or mark_threshold <= 0.0:
+                mark_threshold = float(self.pixel_threshold)
 
-            # Global Y-scale tuning (single factor for all rows) to reduce cumulative drift.
-            row_linear_scale = 1.0
-            adaptive_linear_scaling = self._to_bool(layout.get("adaptive_linear_scaling", True), True)
-            if adaptive_linear_scaling and is_horizontal_target and prepared and col_anchor_map:
-                try:
-                    min_s = float(layout.get("row_scale_min", 0.9))
-                except Exception:
-                    min_s = 0.9
-                try:
-                    max_s = float(layout.get("row_scale_max", 1.1))
-                except Exception:
-                    max_s = 1.1
-                if not np.isfinite(min_s) or not np.isfinite(max_s):
-                    min_s, max_s = 0.9, 1.1
-                if min_s > max_s:
-                    min_s, max_s = max_s, min_s
-                min_s = max(0.85, min_s)
-                max_s = min(1.15, max_s)
-                candidates = np.linspace(min_s, max_s, 11).tolist()
-
-                def _score(scale_mul: float) -> Tuple[int, int]:
-                    normals = 0
-                    penalty = 0
-                    for item in prepared:
-                        col_index = int(item["col_index"])
-                        base_mark = col_anchor_map.get(col_index)
-                        if base_mark is None:
-                            penalty += 3
-                            continue
-                        base_cx = float(base_mark.cx)
-                        row_in_col = int(item.get("row_in_col", 0))
-                        if row_start_from_marker:
-                            base_cy_local = float(base_mark.cy) + (float(row_start_y) * float(scale_mul)) + (
-                                float(row_in_col) * float(row_dy) * float(scale_mul)
-                            )
-                        else:
-                            base_cy_local = (float(row_start_y) * float(scale_mul)) + (
-                                float(row_in_col) * float(row_dy) * float(scale_mul)
-                            )
-                        start_y_local = int(
-                            round(base_cy_local + (float(row_offset_y) * float(scale_mul)) + float(question_off_y) - (box_h / 2.0))
-                        )
-
-                        choices_count_local = int(item["choices"])
-                        hits = 0
-                        for c_idx in range(choices_count_local):
-                            rx_local = int(
-                                round(
-                                    float(base_cx)
-                                    + float(x_offset)
-                                    + (float(c_idx) * float(choice_dx))
-                                    + float(question_off_x)
-                                )
-                            )
-                            marked, _, _, _ = self.image_processor.check_roi(
-                                processed_img, rx_local, start_y_local, int(box_w), int(box_h), self.pixel_threshold
-                            )
-                            if marked:
-                                hits += 1
-                        if hits == 1:
-                            normals += 1
-                        else:
-                            penalty += abs(hits - 1) + 1
-                    return normals, penalty
-
-                best_s = 1.0
-                best_normals, best_penalty = _score(1.0)
-                for s in candidates:
-                    normals, penalty = _score(float(s))
-                    if (normals > best_normals) or (normals == best_normals and penalty < best_penalty):
-                        best_s = float(s)
-                        best_normals = normals
-                        best_penalty = penalty
-                row_linear_scale = float(best_s)
+            try:
+                score_inner_ratio = float(layout.get("score_inner_ratio", 0.18))
+            except Exception:
+                score_inner_ratio = 0.18
+            score_inner_ratio = float(np.clip(score_inner_ratio, 0.0, 0.45))
 
             results: List[QuestionResult] = []
             has_error = False
@@ -1134,15 +935,26 @@ class OMRScanner:
                     base_mark = col_anchor_map[col_index]
                     base_cx = float(base_mark.cx)
                     row_in_col = int(item.get("row_in_col", 0))
-                    if row_start_from_marker:
-                        base_cy = float(base_mark.cy) + (float(row_start_y) * row_linear_scale) + (
-                            (float(row_in_col) * float(row_dy) * row_linear_scale)
+                    anchor_y = float(base_mark.cy) if row_start_from_marker else 0.0
+                    relative_y = (float(row_start_y) + float(row_offset_y)) + (
+                        float(row_in_col) * float(effective_row_dy)
+                    )
+                    if use_page_end_y_correction and expected_h_scaled > 1e-6:
+                        page_gain = self._vertical_page_gain(
+                            anchor_y=anchor_y,
+                            img_h=int(work_img.shape[0]),
+                            expected_h_scaled=float(expected_h_scaled),
+                            expected_anchor_scaled=float(expected_anchor_y_scaled if row_start_from_marker else 0.0),
                         )
+                        target_cy = int(round(anchor_y + (float(relative_y) * float(page_gain)) + float(question_off_y)))
                     else:
-                        base_cy = (float(row_start_y) * row_linear_scale) + (
-                            (float(row_in_col) * float(row_dy) * row_linear_scale)
+                        target_cy = self._indexed_axis_coord(
+                            anchor=float(anchor_y),
+                            axis_offset=(float(row_start_y) + float(row_offset_y)),
+                            axis_step=float(effective_row_dy),
+                            axis_index=row_in_col,
+                            section_offset=float(question_off_y),
                         )
-                    target_cy = base_cy + (float(row_offset_y) * row_linear_scale) + float(question_off_y)
                     start_y = int(round(target_cy - (box_h / 2.0)))
                 else:
                     row_index = int(item["row_index"])
@@ -1151,22 +963,74 @@ class OMRScanner:
                     base_mark = row_anchor_map[row_index]
                     base_cx = float(base_mark.cx)
                     if row_start_from_marker:
-                        base_cy = float(base_mark.cy) + (float(row_start_y) * row_linear_scale)
+                        target_cy = self._indexed_axis_coord(
+                            anchor=float(base_mark.cy),
+                            axis_offset=(float(row_start_y) + float(row_offset_y)),
+                            axis_step=0.0,
+                            axis_index=0,
+                            section_offset=float(question_off_y),
+                        )
                     else:
-                        base_cy = (float(row_start_y) * row_linear_scale) + (float(row_index) * float(row_dy) * row_linear_scale)
-                    target_cy = base_cy + (float(row_offset_y) * row_linear_scale) + float(question_off_y)
+                        target_cy = self._indexed_axis_coord(
+                            anchor=0.0,
+                            axis_offset=(float(row_start_y) + float(row_offset_y)),
+                            axis_step=float(effective_row_dy),
+                            axis_index=row_index,
+                            section_offset=float(question_off_y),
+                        )
                     start_y = int(round(target_cy - (box_h / 2.0)))
 
                 rois: List[Tuple[int, int, int, int]] = []
                 for c_idx in range(choices_count):
-                    target_x = float(base_cx) + float(x_offset) + (float(c_idx) * float(choice_dx)) + float(question_off_x)
-                    rx = int(round(target_x))
+                    rx = self._indexed_axis_coord(
+                        anchor=float(base_cx),
+                        axis_offset=float(x_offset),
+                        axis_step=float(effective_choice_dx),
+                        axis_index=c_idx,
+                        section_offset=float(question_off_x),
+                    )
                     rois.append((rx, int(start_y), int(box_w), int(box_h)))
 
-                marked_indices: List[int] = []
+                roi_scores: List[float] = []
+                roi_clamped: List[Optional[Tuple[int, int, int, int]]] = []
                 for r_idx, (rx, ry, rw, rh) in enumerate(rois):
-                    if self._check_roi(processed_img, rx, ry, rw, rh, debug_img, (0, 255, 0)):
-                        marked_indices.append(int(r_idx))
+                    clamped = self.image_processor.clamp_roi(processed_img, rx, ry, rw, rh)
+                    ratio, _ = self.image_processor.roi_fill_ratio(
+                        processed_img,
+                        rx,
+                        ry,
+                        rw,
+                        rh,
+                        inner_ratio=score_inner_ratio,
+                    )
+                    score = float(ratio) if ratio is not None else 0.0
+                    roi_scores.append(score)
+                    roi_clamped.append(clamped)
+                    if debug_img is not None and clamped is not None:
+                        x1, y1, w1, h1 = clamped
+                        color = (0, 255, 0) if score >= mark_threshold else (0, 0, 255)
+                        cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), color, 1)
+                        cv2.putText(
+                            debug_img,
+                            f"{int(score * 100)}",
+                            (x1, y1 + h1 - 2),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.3,
+                            color,
+                            1,
+                        )
+
+                marked_indices: List[int] = [int(i) for i, s in enumerate(roi_scores) if s >= mark_threshold]
+
+                if debug_img is not None and marked_indices:
+                    for mi in marked_indices:
+                        if 0 <= int(mi) < len(roi_clamped):
+                            rc = roi_clamped[int(mi)]
+                            if rc is None:
+                                continue
+                            x1, y1, w1, h1 = rc
+                            c = (0, 255, 0) if len(marked_indices) == 1 else (0, 165, 255)
+                            cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), c, 2)
 
                 status = self._determine_status(marked_indices)
                 if status != "정상":
@@ -1212,63 +1076,17 @@ class OMRScanner:
             return False, ""
 
         off_x, off_y = self._combined_offset(section_key)
-        anchor_y = float(min(float(item["y"]) for item in prepared))
-        row_linear_scale = self._fixed_row_linear_scale(cfg)
-        auto_dy_scale = self._to_bool(cfg.get("auto_dy_scale", False), False)
 
-        def _evaluate(scale_mul: float, draw: bool) -> Tuple[int, str]:
-            hits_local = 0
-            picked_local = ""
-            for item in prepared:
-                x = int(round(float(item["x"]) * float(scale) + float(off_x)))
-                rel_y = float(item["y"]) - float(anchor_y)
-                y_cfg = float(anchor_y) + (float(rel_y) * float(scale_mul))
-                y = int(round(float(y_cfg) * float(scale) + float(off_y)))
-                w = int(item["w"])
-                h = int(item["h"])
-                if draw:
-                    marked = self._check_roi(processed_img, x, y, w, h, debug_img, (255, 0, 255))
-                else:
-                    marked, _, _, _ = self.image_processor.check_roi(
-                        processed_img, x, y, w, h, self.pixel_threshold
-                    )
-                if marked:
-                    hits_local += 1
-                    picked_local = str(item["label"])
-            return hits_local, picked_local
-
-        if auto_dy_scale:
-            try:
-                min_s = float(cfg.get("row_scale_min", 0.9))
-            except Exception:
-                min_s = 0.9
-            try:
-                max_s = float(cfg.get("row_scale_max", 1.1))
-            except Exception:
-                max_s = 1.1
-            if not np.isfinite(min_s) or not np.isfinite(max_s):
-                min_s, max_s = 0.9, 1.1
-            if min_s > max_s:
-                min_s, max_s = max_s, min_s
-            min_s = max(0.85, min_s)
-            max_s = min(1.15, max_s)
-            candidates = np.linspace(min_s, max_s, 11).tolist()
-
-            best_s = float(row_linear_scale)
-            best_hits, _ = _evaluate(best_s, draw=False)
-            best_penalty = 0 if best_hits == 1 else (abs(best_hits - 1) + 1)
-            for s in candidates:
-                hits, _ = _evaluate(float(s), draw=False)
-                penalty = 0 if hits == 1 else (abs(hits - 1) + 1)
-                if (penalty < best_penalty) or (
-                    penalty == best_penalty and abs(float(s) - 1.0) < abs(best_s - 1.0)
-                ):
-                    best_s = float(s)
-                    best_penalty = penalty
-                    best_hits = hits
-            row_linear_scale = float(best_s)
-
-        hits, picked = _evaluate(float(row_linear_scale), draw=True)
+        hits = 0
+        picked = ""
+        for item in prepared:
+            x = int(round(float(item["x"]) * float(scale) + float(off_x)))
+            y = int(round(float(item["y"]) * float(scale) + float(off_y)))
+            w = int(item["w"])
+            h = int(item["h"])
+            if self._check_roi(processed_img, x, y, w, h, debug_img, (255, 0, 255)):
+                hits += 1
+                picked = str(item["label"])
         return (hits == 1), (picked if hits == 1 else "")
 
     def _decode_marker_digit_columns(
@@ -1281,6 +1099,7 @@ class OMRScanner:
         section_key: str = "question",
         global_scale_x: Optional[float] = None,
         global_scale_y: Optional[float] = None,
+        layout_cfg: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str]:
         if processed_img is None or not markers or not isinstance(cfg, dict):
             return False, ""
@@ -1299,96 +1118,36 @@ class OMRScanner:
         scale_y = float(scale if global_scale_y is None else global_scale_y)
         x_offset = self._scaled_config_offset(section_key, float(cfg.get("x_offset", 0)), scale_x)
         y_offset = self._scaled_config_offset(section_key, float(cfg.get("y_offset", 0)), scale_y)
-        row_dy = self._scaled_config_offset(section_key, float(cfg.get("row_dy", cfg.get("row_h", 20))), scale_y)
+        raw_row_dy = float(cfg.get("row_dy", cfg.get("row_h", 20)))
+        effective_row_dy = float(raw_row_dy) * float(scale_y)
         box_w = max(1, int(round(float(cfg.get("box_w", 40)) * float(scale_x))))
         box_h = max(1, int(round(float(cfg.get("box_h", 40)) * float(scale_y))))
         off_x, off_y = self._combined_offset(section_key)
 
-        row_linear_scale = self._fixed_row_linear_scale(cfg)
-        marker_span_x = 0.0
-        marker_span_y = 0.0
-        if len(markers) >= 2:
-            marker_span_x = float(max(int(m.cx) for m in markers) - min(int(m.cx) for m in markers))
-            marker_span_y = float(max(int(m.cy) for m in markers) - min(int(m.cy) for m in markers))
-        is_horizontal_axis = marker_span_x >= marker_span_y
         anchor_y_mode = str(cfg.get("anchor_y_mode", "median")).strip().lower()
-        median_anchor_y = float(np.median(np.asarray([float(m.cy) for m in markers], dtype=np.float32))) if markers else 0.0
-
-        auto_dy_scale = self._to_bool(cfg.get("auto_dy_scale", False), False)
-        if auto_dy_scale:
-            try:
-                min_s = float(cfg.get("row_scale_min", 0.9))
-            except Exception:
-                min_s = 0.9
-            try:
-                max_s = float(cfg.get("row_scale_max", 1.1))
-            except Exception:
-                max_s = 1.1
-            if not np.isfinite(min_s) or not np.isfinite(max_s):
-                min_s, max_s = 0.9, 1.1
-            if min_s > max_s:
-                min_s, max_s = max_s, min_s
-            min_s = max(0.85, min_s)
-            max_s = min(1.15, max_s)
-            candidates = np.linspace(min_s, max_s, 11).tolist()
-
-            def _score(scale_mul: float) -> Tuple[int, int]:
-                normals = 0
-                penalty = 0
-                for digit_idx_local in range(digits):
-                    m_idx_local = marker_start_index + digit_idx_local
-                    if m_idx_local < 0 or m_idx_local >= len(markers):
-                        penalty += 2
-                        continue
-                    rows_local = rows_default
-                    if digit_idx_local < len(rows_per_digit):
-                        try:
-                            rows_local = int(rows_per_digit[digit_idx_local])
-                        except Exception:
-                            rows_local = rows_default
-                    if rows_local <= 0:
-                        penalty += 2
-                        continue
-
-                    base_local = markers[m_idx_local]
-                    center_x_local = int(round(float(base_local.cx) + float(x_offset) + float(off_x)))
-                    base_cy_local = float(base_local.cy)
-                    if is_horizontal_axis and anchor_y_mode == "median":
-                        base_cy_local = float(median_anchor_y)
-
-                    hits_local = 0
-                    for r_idx_local in range(rows_local):
-                        center_y_local = int(
-                            round(
-                                float(base_cy_local)
-                                + (float(y_offset) * float(scale_mul))
-                                + (float(r_idx_local) * float(row_dy) * float(scale_mul))
-                                + float(off_y)
-                            )
-                        )
-                        rx_local = int(center_x_local - (box_w // 2))
-                        ry_local = int(center_y_local - (box_h // 2))
-                        marked_local, _, _, _ = self.image_processor.check_roi(
-                            processed_img, rx_local, ry_local, box_w, box_h, self.pixel_threshold
-                        )
-                        if marked_local:
-                            hits_local += 1
-
-                    if hits_local == 1:
-                        normals += 1
-                    else:
-                        penalty += abs(hits_local - 1) + 1
-                return normals, penalty
-
-            best_s = float(row_linear_scale)
-            best_normals, best_penalty = _score(best_s)
-            for s in candidates:
-                normals, penalty = _score(float(s))
-                if (normals > best_normals) or (normals == best_normals and penalty < best_penalty):
-                    best_s = float(s)
-                    best_normals = normals
-                    best_penalty = penalty
-            row_linear_scale = float(best_s)
+        expected_w_scaled, expected_h_scaled = self._resolve_scaled_layout_canvas(
+            layout_cfg,
+            img_w=int(processed_img.shape[1]),
+            img_h=int(processed_img.shape[0]),
+            base_scale=float(scale),
+        )
+        try:
+            expected_anchor_y = float(
+                cfg.get(
+                    "expected_anchor_y",
+                    (layout_cfg or {}).get(
+                        "expected_anchor_y",
+                        (layout_cfg or {}).get("top_marker_y", (layout_cfg or {}).get("anchor_top_y", 0.0)),
+                    ),
+                )
+            )
+        except Exception:
+            expected_anchor_y = 0.0
+        expected_anchor_y_scaled = float(expected_anchor_y) * float(scale_y)
+        use_page_end_y_correction = self._to_bool(
+            cfg.get("page_end_y_correction", self._markers_span_is_horizontal(markers)),
+            self._markers_span_is_horizontal(markers),
+        )
 
         result: List[str] = []
         overall_ok = True
@@ -1410,49 +1169,42 @@ class OMRScanner:
 
             base = markers[m_idx]
             center_x = int(round(float(base.cx) + float(x_offset) + float(off_x)))
-            base_cy = float(base.cy)
-            if is_horizontal_axis and anchor_y_mode == "median":
-                base_cy = float(median_anchor_y)
+            base_cy = self._marker_anchor_y(markers, base, anchor_y_mode=anchor_y_mode)
+            page_gain = 1.0
+            if use_page_end_y_correction and expected_h_scaled > 1e-6:
+                page_gain = self._vertical_page_gain(
+                    anchor_y=float(base_cy),
+                    img_h=int(processed_img.shape[0]),
+                    expected_h_scaled=float(expected_h_scaled),
+                    expected_anchor_scaled=float(expected_anchor_y_scaled),
+                )
             best_r = -1
             best_ratio = -1.0
-            best_y = int(round(float(base_cy) + float(y_offset) + float(off_y)))
+            best_rect: Optional[Tuple[int, int, int, int]] = None
             hits = 0
-            draw_rows = max(rows_default, rows)
-            for r_idx in range(draw_rows):
-                center_y = int(
-                    round(
-                        float(base_cy)
-                        + (float(y_offset) * float(row_linear_scale))
-                        + (float(r_idx) * float(row_dy) * float(row_linear_scale))
-                        + float(off_y)
-                    )
+            for r_idx in range(rows):
+                relative_y = float(y_offset) + (float(r_idx) * float(effective_row_dy))
+                center_y = int(round(float(base_cy) + (float(relative_y) * float(page_gain)) + float(off_y)))
+                rx = int(center_x - (box_w // 2))
+                ry = int(center_y - (box_h // 2))
+                marked, ratio, clamped, _ = self.image_processor.check_roi(
+                    processed_img, rx, ry, box_w, box_h, self.pixel_threshold
                 )
-                local_best = -1.0
-                local_y = center_y
-                if r_idx < rows:
-                    rx = int(center_x - (box_w // 2))
-                    ry = int(center_y - (box_h // 2))
-                    clamped = self.image_processor.clamp_roi(processed_img, rx, ry, box_w, box_h)
+                if debug_img is not None:
                     if clamped is not None:
                         x1, y1, w1, h1 = clamped
-                        roi = processed_img[y1 : y1 + h1, x1 : x1 + w1]
-                        local_best = float(cv2.countNonZero(roi)) / float(w1 * h1) if (w1 * h1) > 0 else 0.0
-                if debug_img is not None:
-                    rx = int(center_x - (box_w // 2))
-                    ry = int(local_y - (box_h // 2))
-                    color = (0, 255, 0) if local_best > self.pixel_threshold else (0, 0, 255)
-                    cv2.rectangle(debug_img, (rx, ry), (rx + box_w, ry + box_h), color, 1)
-                if r_idx < rows and local_best > self.pixel_threshold:
+                        color = (0, 255, 0) if marked else (0, 0, 255)
+                        cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), color, 1)
+                if marked:
                     hits += 1
-                    if local_best > best_ratio:
-                        best_ratio = local_best
+                    if ratio > best_ratio:
+                        best_ratio = ratio
                         best_r = r_idx
-                        best_y = local_y
-            if debug_img is not None and best_r >= 0:
-                rx = int(center_x - (box_w // 2))
-                ry = int(best_y - (box_h // 2))
+                        best_rect = clamped
+            if debug_img is not None and best_r >= 0 and best_rect is not None:
+                x1, y1, w1, h1 = best_rect
                 color = (0, 255, 0) if hits == 1 else (0, 0, 255)
-                cv2.rectangle(debug_img, (rx, ry), (rx + box_w, ry + box_h), color, 2)
+                cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), color, 2)
             if hits == 1 and best_r >= 0:
                 result.append(str(best_r))
             else:
@@ -1471,6 +1223,7 @@ class OMRScanner:
         section_key: str = "question",
         global_scale_x: Optional[float] = None,
         global_scale_y: Optional[float] = None,
+        layout_cfg: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str]:
         if processed_img is None or not markers or not isinstance(cfg, dict):
             return False, ""
@@ -1500,108 +1253,66 @@ class OMRScanner:
         scale_y = float(scale if global_scale_y is None else global_scale_y)
         x_offset = self._scaled_config_offset(section_key, float(cfg.get("x_offset", 0)), scale_x)
         y_offset = self._scaled_config_offset(section_key, float(cfg.get("y_offset", 0)), scale_y)
-        choice_dy = self._scaled_config_offset(
-            section_key,
-            float(cfg.get("choice_dy", cfg.get("row_dy", 40))),
-            scale_y,
-        )
+        raw_choice_dy = float(cfg.get("choice_dy", cfg.get("row_dy", 40)))
+        effective_choice_dy = float(raw_choice_dy) * float(scale_y)
         raw_choice_offsets = cfg.get("choice_y_offsets", [])
         choice_offsets: List[float] = []
         if isinstance(raw_choice_offsets, list):
             for value in raw_choice_offsets:
                 try:
-                    choice_offsets.append(
-                        self._scaled_config_offset(section_key, float(value), scale_y)
-                    )
+                    choice_offsets.append(float(value) * float(scale_y))
                 except Exception:
                     continue
         box_w = max(1, int(round(float(cfg.get("box_w", 40)) * float(scale_x))))
         box_h = max(1, int(round(float(cfg.get("box_h", 40)) * float(scale_y))))
         off_x, off_y = self._combined_offset(section_key)
+        expected_w_scaled, expected_h_scaled = self._resolve_scaled_layout_canvas(
+            layout_cfg,
+            img_w=int(processed_img.shape[1]),
+            img_h=int(processed_img.shape[0]),
+            base_scale=float(scale),
+        )
+        try:
+            expected_anchor_y = float(
+                cfg.get(
+                    "expected_anchor_y",
+                    (layout_cfg or {}).get(
+                        "expected_anchor_y",
+                        (layout_cfg or {}).get("top_marker_y", (layout_cfg or {}).get("anchor_top_y", 0.0)),
+                    ),
+                )
+            )
+        except Exception:
+            expected_anchor_y = 0.0
+        expected_anchor_y_scaled = float(expected_anchor_y) * float(scale_y)
+        use_page_end_y_correction = self._to_bool(
+            cfg.get("page_end_y_correction", self._markers_span_is_horizontal(markers)),
+            self._markers_span_is_horizontal(markers),
+        )
 
         base = markers[marker_index]
         center_x = int(round(float(base.cx) + float(x_offset) + float(off_x)))
-        row_linear_scale = self._fixed_row_linear_scale(cfg)
-        marker_span_x = 0.0
-        marker_span_y = 0.0
-        if len(markers) >= 2:
-            marker_span_x = float(max(int(m.cx) for m in markers) - min(int(m.cx) for m in markers))
-            marker_span_y = float(max(int(m.cy) for m in markers) - min(int(m.cy) for m in markers))
-        is_horizontal_axis = marker_span_x >= marker_span_y
         anchor_y_mode = str(cfg.get("anchor_y_mode", "median")).strip().lower()
-        base_cy = float(base.cy)
-        if is_horizontal_axis and anchor_y_mode == "median":
-            base_cy = float(np.median(np.asarray([float(m.cy) for m in markers], dtype=np.float32)))
-
-        auto_dy_scale = self._to_bool(cfg.get("auto_dy_scale", False), False)
-        if auto_dy_scale:
-            try:
-                min_s = float(cfg.get("row_scale_min", 0.9))
-            except Exception:
-                min_s = 0.9
-            try:
-                max_s = float(cfg.get("row_scale_max", 1.1))
-            except Exception:
-                max_s = 1.1
-            if not np.isfinite(min_s) or not np.isfinite(max_s):
-                min_s, max_s = 0.9, 1.1
-            if min_s > max_s:
-                min_s, max_s = max_s, min_s
-            min_s = max(0.85, min_s)
-            max_s = min(1.15, max_s)
-            candidates = np.linspace(min_s, max_s, 11).tolist()
-
-            def _rel_y(idx_local: int) -> float:
-                if idx_local < len(choice_offsets):
-                    return float(choice_offsets[idx_local])
-                if idx_local < len(per_choice_offsets) and per_choice_offsets[idx_local] is not None:
-                    return self._scaled_config_offset(section_key, float(per_choice_offsets[idx_local]), scale_y)
-                return float(idx_local) * float(choice_dy)
-
-            def _score(scale_mul: float) -> Tuple[int, int]:
-                hits_local = 0
-                for idx_local, _ in enumerate(labels):
-                    rel_y_local = _rel_y(idx_local)
-                    center_y_local = int(
-                        round(
-                            float(base_cy)
-                            + (float(y_offset) * float(scale_mul))
-                            + (float(rel_y_local) * float(scale_mul))
-                            + float(off_y)
-                        )
-                    )
-                    rx_local = int(center_x - (box_w // 2))
-                    ry_local = int(center_y_local - (box_h // 2))
-                    marked_local, _, _, _ = self.image_processor.check_roi(
-                        processed_img, rx_local, ry_local, box_w, box_h, self.pixel_threshold
-                    )
-                    if marked_local:
-                        hits_local += 1
-                normals = 1 if hits_local == 1 else 0
-                penalty = 0 if hits_local == 1 else (abs(hits_local - 1) + 1)
-                return normals, penalty
-
-            best_s = float(row_linear_scale)
-            best_normals, best_penalty = _score(best_s)
-            for s in candidates:
-                normals, penalty = _score(float(s))
-                if (normals > best_normals) or (normals == best_normals and penalty < best_penalty):
-                    best_s = float(s)
-                    best_normals = normals
-                    best_penalty = penalty
-            row_linear_scale = float(best_s)
-
-        base_y = int(round(float(base_cy) + (float(y_offset) * float(row_linear_scale)) + float(off_y)))
+        base_cy = self._marker_anchor_y(markers, base, anchor_y_mode=anchor_y_mode)
+        page_gain = 1.0
+        if use_page_end_y_correction and expected_h_scaled > 1e-6:
+            page_gain = self._vertical_page_gain(
+                anchor_y=float(base_cy),
+                img_h=int(processed_img.shape[0]),
+                expected_h_scaled=float(expected_h_scaled),
+                expected_anchor_scaled=float(expected_anchor_y_scaled),
+            )
         hits = 0
         picked = ""
         for idx, label in enumerate(labels):
+            relative_y = float(y_offset)
             if idx < len(choice_offsets):
-                rel_y = float(choice_offsets[idx])
+                relative_y += float(choice_offsets[idx])
             elif idx < len(per_choice_offsets) and per_choice_offsets[idx] is not None:
-                rel_y = self._scaled_config_offset(section_key, float(per_choice_offsets[idx]), scale_y)
+                relative_y += float(per_choice_offsets[idx]) * float(scale_y)
             else:
-                rel_y = float(idx) * float(choice_dy)
-            center_y = int(round(float(base_y) + (float(rel_y) * float(row_linear_scale))))
+                relative_y += float(idx) * float(effective_choice_dy)
+            center_y = int(round(float(base_cy) + (float(relative_y) * float(page_gain)) + float(off_y)))
             rx = center_x - (box_w // 2)
             ry = center_y - (box_h // 2)
             if self._check_roi(
@@ -1643,21 +1354,19 @@ class OMRScanner:
             field_cfg["type"] = f_type
             if f_type in ("marker_digit_columns", "marker_single_choice_column"):
                 field_cfg.setdefault("anchor_y_mode", "median")
-                field_cfg.setdefault("auto_dy_scale", True)
-                field_cfg.setdefault("row_scale_min", 0.9)
-                field_cfg.setdefault("row_scale_max", 1.1)
             field_cfg.setdefault("section", key)
             fields.append(field_cfg)
 
         if not fields:
             return False, {}, None
-        return self.analyze_custom_fields(original_img, fields, scale=scale)
+        return self.analyze_custom_fields(original_img, fields, scale=scale, layout=config)
 
     def analyze_custom_fields(
         self,
         original_img: Optional[np.ndarray],
         fields: Sequence[Dict[str, Any]],
         scale: float = 1.0,
+        layout: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, Dict[str, Any], Optional[np.ndarray]]:
         if original_img is None or not fields:
             return False, {}, None
@@ -1672,9 +1381,6 @@ class OMRScanner:
             cfg["type"] = eff_type
             if eff_type in marker_field_types:
                 cfg.setdefault("anchor_y_mode", "median")
-                cfg.setdefault("auto_dy_scale", True)
-                cfg.setdefault("row_scale_min", 0.9)
-                cfg.setdefault("row_scale_max", 1.1)
             normalized_fields.append(cfg)
 
         marker_fields = [
@@ -1738,13 +1444,13 @@ class OMRScanner:
                 if len(interp_axis) > len(marker_axis_for_decode):
                     marker_axis_for_decode = sorted(interp_axis, key=lambda m: int(getattr(m, axis_key, 0)))
 
-        scale_cfg = marker_field if isinstance(marker_field, dict) else {}
+        full_layout = layout if isinstance(layout, dict) else {}
         global_scale_x, global_scale_y = self._compute_global_scale_factors(
             work_img,
             marker_axis_for_decode,
             marker_location,
             scale,
-            cfg=scale_cfg,
+            cfg=full_layout,
         )
 
         def _decode_marker_field(
@@ -1766,6 +1472,7 @@ class OMRScanner:
                     section_key=section_key,
                     global_scale_x=global_scale_x,
                     global_scale_y=global_scale_y,
+                    layout_cfg=full_layout,
                 )
             if field_type == "marker_single_choice_column":
                 return self._decode_marker_single_choice_column(
@@ -1777,6 +1484,7 @@ class OMRScanner:
                     section_key=section_key,
                     global_scale_x=global_scale_x,
                     global_scale_y=global_scale_y,
+                    layout_cfg=full_layout,
                 )
             return False, ""
 

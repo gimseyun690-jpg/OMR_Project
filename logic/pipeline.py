@@ -36,6 +36,34 @@ class ScanPipeline:
     # ====== 설정 메서드 ======
     def set_project(self, db_path: str | None):
         self.current_db_path = db_path
+        if self.form_path and os.path.exists(self.form_path):
+            self.set_form_path(self.form_path)
+
+    @staticmethod
+    def _parse_int_setting(raw, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+        try:
+            value = int(float(raw))
+        except Exception:
+            value = int(default)
+        if min_value is not None:
+            value = max(int(min_value), value)
+        if max_value is not None:
+            value = min(int(max_value), value)
+        return int(value)
+
+    @staticmethod
+    def _parse_float_setting(raw, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
+        try:
+            value = float(raw)
+        except Exception:
+            value = float(default)
+        if not np.isfinite(value):
+            value = float(default)
+        if min_value is not None:
+            value = max(float(min_value), value)
+        if max_value is not None:
+            value = min(float(max_value), value)
+        return float(value)
 
     def set_scan_dir(self, scan_dir: str):
         self.scan_dir = scan_dir
@@ -62,13 +90,34 @@ class ScanPipeline:
 
                     # 전처리(adaptiveThreshold) 파라미터 (없으면 기본 유지)
                     block_size = omr.get("block_size")  # JSON에 없으면 None -> 기본 15 유지
-                    C = omr.get("C")                    # JSON에 없으면 None -> 기본 7 유지
+                    C = self._parse_int_setting(omr.get("C", 7), 7, min_value=0, max_value=30)
 
                     # 마킹 판정 비율
-                    pixel_ratio = omr.get("pixel_ratio", 0.05)
+                    pixel_ratio = self._parse_float_setting(omr.get("pixel_ratio", 0.05), 0.05, min_value=0.0, max_value=1.0)
 
                     # 사이드 마커 검출 threshold
-                    marker_thresh = omr.get("threshold", 120)
+                    marker_thresh = self._parse_int_setting(omr.get("threshold", 120), 120, min_value=0, max_value=255)
+
+                    # DB override values (UI tuning).
+                    if self.current_db_path:
+                        marker_thresh = self._parse_int_setting(
+                            self.db.get_setting(self.current_db_path, "omr_threshold", "120"),
+                            marker_thresh,
+                            min_value=0,
+                            max_value=255,
+                        )
+                        C = self._parse_int_setting(
+                            self.db.get_setting(self.current_db_path, "omr_c", "7"),
+                            C,
+                            min_value=0,
+                            max_value=30,
+                        )
+                        pixel_ratio = self._parse_float_setting(
+                            self.db.get_setting(self.current_db_path, "omr_pixel_ratio", "0.05"),
+                            pixel_ratio,
+                            min_value=0.0,
+                            max_value=1.0,
+                        )
                     section_offsets = self.form_data.get("section_offsets", {})
                     if not isinstance(section_offsets, dict):
                         section_offsets = {}
@@ -149,6 +198,61 @@ class ScanPipeline:
         has_layout = isinstance(self.form_data.get("question_layout", {}), dict)
         return has_questions and has_layout and "layout_mode" not in self.form_data
 
+    def _build_legacy_side_marker_schema(self):
+        """Translate legacy side_marker schema into marker-question layout."""
+        form = self.form_data if isinstance(self.form_data, dict) else {}
+        raw_questions = form.get("questions", [])
+        questions = []
+        if isinstance(raw_questions, list):
+            for i, q in enumerate(raw_questions):
+                item = dict(q) if isinstance(q, dict) else {"no": i + 1, "type": "vote"}
+                item.setdefault("no", i + 1)
+                if item.get("row_index") is None and item.get("y") is None:
+                    item["row_index"] = i
+                item.setdefault("choices", 2)
+                questions.append(item)
+
+        roi_params = form.get("roi_params", {}) or {}
+        raw_dist_agree = roi_params.get("dist_agree") or roi_params.get("marker_to_agree_dist") or 100
+        raw_dist_disagree = roi_params.get("dist_disagree") or roi_params.get("marker_to_disagree_dist") or 200
+        try:
+            dist_agree = float(raw_dist_agree)
+        except Exception:
+            dist_agree = 100.0
+        try:
+            dist_disagree = float(raw_dist_disagree)
+        except Exception:
+            dist_disagree = 200.0
+
+        choice_dx = float(dist_disagree - dist_agree)
+        if abs(choice_dx) < 1e-6:
+            choice_dx = 1.0
+
+        base_dpi = int(form.get("dpi") or form.get("base_dpi") or 150)
+        if base_dpi <= 0:
+            base_dpi = 150
+        inferred_width = int(round(float(self.engine.width) * (float(base_dpi) / 150.0)))
+        inferred_height = int(round(float(self.engine.height) * (float(base_dpi) / 150.0)))
+
+        question_layout = {
+            "width": int(form.get("width", inferred_width)),
+            "height": int(form.get("height", inferred_height)),
+            "x_offset": float(dist_agree),
+            "choice_dx": float(choice_dx),
+            "box_w": int(roi_params.get("box_w", 35)),
+            "box_h": int(roi_params.get("box_h", 35)),
+            "row_offset_y": 0,
+            "row_start_y": 0,
+            "row_start_from_marker": True,
+            "row_dy": 0,
+            "rows_per_col": max(1, len(questions)),
+            "marker_start_index": 1,
+            "columns": 1,
+            "numbering_order": "column_major",
+        }
+        marker_location = form.get("marker_location", "left")
+        return questions, question_layout, marker_location
+
     def _save_debug_if_needed(self, debug_img, image_path: str, reason: str):
         if not self.debug_save_on_error or debug_img is None:
             return
@@ -203,9 +307,10 @@ class ScanPipeline:
                 layout_mode = self.form_manager.get_layout_mode()
 
                 if self._is_new_marker_schema():
-                    # Top/side marker forms are more stable when marker detection runs
-                    # on the original image (avoid extra blur from pre-resize stage).
-                    analysis_img = img
+                    # Marker-schema forms use scale derived from engine DPI/form DPI.
+                    # Keep analysis image on aligned canvas by default so coordinates and scale match.
+                    use_original_marker_image = bool(self.form_data.get("use_original_marker_image", False))
+                    analysis_img = img if use_original_marker_image else aligned_img
                     questions = (
                         self.engine.parse_config(self.form_data)
                         if "question_groups" in self.form_data
@@ -224,72 +329,21 @@ class ScanPipeline:
                     status_code = self._status_to_code(status)
 
                 elif layout_mode == "side_marker":
-                    analysis_img = img
-                    # [수정] FormManager 함수 대신, JSON 데이터에서 직접 꺼내기 (안전한 방법)
-                    questions = (
-                        self.engine.parse_config(self.form_data)
-                        if "question_groups" in self.form_data
-                        else self.form_data.get("questions", [])
-                    )
-                    # row_index 미지정 시 마커 순서대로 자동 매핑
-                    if questions:
-                        questions = [
-                            (q if isinstance(q, dict) else {"no": i + 1, "type": "vote"})
-                            for i, q in enumerate(questions)
-                        ]
-                        for i, q in enumerate(questions):
-                            if q.get("row_index") is None and q.get("y") is None:
-                                q["row_index"] = i
-                    # roi_params 키를 가져오되 없으면 빈 딕셔너리
-                    roi_params = self.form_data.get("roi_params", {}) 
-                    if not roi_params and isinstance(self.form_data.get("layout_defaults"), dict):
-                        roi_params = dict(self.form_data.get("layout_defaults", {}))
-                    marker_location = self.form_data.get("marker_location", "left")
-                    
-                    # 엔진 호출 (scale 인자 필수 전달!)
-                    status, results, debug_img, error_reason = self.engine.analyze_side_marker_sheet(
-                        analysis_img, questions, roi_params, scale=scale, marker_location=marker_location
+                    questions, question_layout, marker_location = self._build_legacy_side_marker_schema()
+                    status, results, debug_img, error_reason = self.engine.analyze_marker_questions(
+                        aligned_img,
+                        questions,
+                        question_layout,
+                        scale=scale,
+                        marker_location=marker_location,
                     )
                     status_code = self._status_to_code(status)
 
                 elif layout_mode == "timing_mark":
-                    analysis_img = img
-                    timing_params = self.form_data.get("timing_mark", {}) if isinstance(self.form_data, dict) else {}
-                    left_ratio = float(timing_params.get("left_ratio", 0.08))
-                    x_offset_ratio = float(timing_params.get("x_offset_ratio", 0.3))
-                    box_w_ratio = float(timing_params.get("box_w_ratio", 0.04))
-                    box_h_ratio = float(timing_params.get("box_h_ratio", 0.02))
-                    pixel_ratio = float(timing_params.get("pixel_ratio", self.engine.pixel_threshold))
-
-                    aligned_img, rows, anchor_x, xs_list = self.engine.find_timing_marks_aligned(
-                        analysis_img, left_ratio=left_ratio
-                    )
-                    if not rows:
-                        status_code = "ERR"
-                        results = []
-                        debug_img = aligned_img.copy()
-                        error_reason = "TIMING_MARK"
-                    else:
-                        marks, debug_img = self.engine.read_answers(
-                            aligned_img,
-                            rows,
-                            anchor_x=anchor_x,
-                            x_offset_ratio=x_offset_ratio,
-                            box_w_ratio=box_w_ratio,
-                            box_h_ratio=box_h_ratio,
-                            pixel_threshold=pixel_ratio,
-                        )
-                        results = []
-                        has_error = False
-                        for i, marked in enumerate(marks):
-                            marked_indices = [0] if marked else []
-                            status = self.engine._determine_status(marked_indices)
-                            if status != "정상":
-                                has_error = True
-                            results.append({"q_num": i + 1, "marked": marked_indices, "status": status})
-                        if has_error and not error_reason:
-                            error_reason = "MARK"
-                        status_code = "ERR" if has_error else "OK"
+                    status_code = "ERR"
+                    results = []
+                    debug_img = aligned_img.copy()
+                    error_reason = "TIMING_MARK_DEPRECATED"
 
                 else:
                     # 고정 좌표 모드
@@ -310,7 +364,10 @@ class ScanPipeline:
             if self.candidate_enabled:
                 if isinstance(self.form_data, dict) and "fields" in self.form_data:
                     c_ok, c_info, c_debug = self.engine.analyze_custom_fields(
-                        analysis_img, self.form_data.get("fields", []), scale
+                        analysis_img,
+                        self.form_data.get("fields", []),
+                        scale=scale,
+                        layout=self.form_data,
                     )
                     candidate_info = c_info
 

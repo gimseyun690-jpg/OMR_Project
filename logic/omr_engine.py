@@ -356,36 +356,6 @@ class OMREngine:
     def _fit_marker_line(self, rows: Sequence[float], xs_list: Sequence[float]) -> Optional[Dict[str, Any]]:
         return self.geometry_manager._fit_marker_line(rows, xs_list)
 
-    def find_timing_marks(self, image: Optional[np.ndarray], left_ratio: float = 0.08) -> Tuple[List[int], int, List[int]]:
-        return self.scanner.find_timing_marks(image, left_ratio=left_ratio)
-
-    def find_timing_marks_aligned(
-        self,
-        image: Optional[np.ndarray],
-        left_ratio: float = 0.08,
-    ) -> Tuple[Optional[np.ndarray], List[int], int, List[int]]:
-        return self.scanner.find_timing_marks_aligned(image, left_ratio=left_ratio)
-
-    def read_answers(
-        self,
-        image: Optional[np.ndarray],
-        rows: Sequence[int],
-        anchor_x: int = 0,
-        x_offset_ratio: float = 0.3,
-        box_w_ratio: float = 0.04,
-        box_h_ratio: float = 0.02,
-        pixel_threshold: Optional[float] = None,
-    ) -> Tuple[List[bool], Optional[np.ndarray]]:
-        return self.scanner.read_answers(
-            image=image,
-            rows=rows,
-            anchor_x=anchor_x,
-            x_offset_ratio=x_offset_ratio,
-            box_w_ratio=box_w_ratio,
-            box_h_ratio=box_h_ratio,
-            pixel_threshold=pixel_threshold,
-        )
-
     def analyze_sheet_cv(
         self,
         original_img: Optional[np.ndarray],
@@ -393,22 +363,6 @@ class OMREngine:
         ref_anchor: Optional[Any] = None,
     ) -> Tuple[str, List[Dict[str, Any]], Optional[np.ndarray]]:
         return self.scanner.analyze_sheet_cv(original_img, questions_rois, ref_anchor=ref_anchor)
-
-    def analyze_side_marker_sheet(
-        self,
-        original_img: Optional[np.ndarray],
-        questions: Sequence[Dict[str, Any]],
-        params: Dict[str, Any],
-        scale: float = 1.0,
-        marker_location: str = "left",
-    ) -> Tuple[str, List[Dict[str, Any]], Optional[np.ndarray], str]:
-        return self.scanner.analyze_side_marker_sheet(
-            original_img=original_img,
-            questions=questions,
-            params=params or {},
-            scale=scale,
-            marker_location=marker_location,
-        )
 
     def analyze_marker_questions(
         self,
@@ -439,8 +393,9 @@ class OMREngine:
         original_img: Optional[np.ndarray],
         fields: Sequence[Dict[str, Any]],
         scale: float = 1.0,
+        layout: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, Dict[str, Any], Optional[np.ndarray]]:
-        return self.scanner.analyze_custom_fields(original_img, fields, scale=scale)
+        return self.scanner.analyze_custom_fields(original_img, fields, scale=scale, layout=layout)
 
     def _check_roi(
         self,
@@ -490,32 +445,6 @@ class OMREngine:
     ) -> Tuple[bool, str]:
         marker_objs = self._markers_from_any(markers or [])
         return self.scanner._decode_marker_single_choice_column(processed_img, marker_objs, cfg, scale, debug_img)
-
-    # Backward-compatible aliases used by current pipeline.
-    def _legacy_find_timing_marks_aligned(
-        self, image: Optional[np.ndarray], left_ratio: float = 0.08
-    ) -> Tuple[Optional[np.ndarray], List[int], int, List[int]]:
-        return self.find_timing_marks_aligned(image, left_ratio=left_ratio)
-
-    def _legacy_read_answers(
-        self,
-        image: Optional[np.ndarray],
-        rows: Sequence[int],
-        anchor_x: int = 0,
-        x_offset_ratio: float = 0.3,
-        box_w_ratio: float = 0.04,
-        box_h_ratio: float = 0.02,
-        pixel_threshold: Optional[float] = None,
-    ) -> Tuple[List[bool], Optional[np.ndarray]]:
-        return self.read_answers(
-            image=image,
-            rows=rows,
-            anchor_x=anchor_x,
-            x_offset_ratio=x_offset_ratio,
-            box_w_ratio=box_w_ratio,
-            box_h_ratio=box_h_ratio,
-            pixel_threshold=pixel_threshold,
-        )
 
     def _legacy_analyze_sheet_cv(
         self,

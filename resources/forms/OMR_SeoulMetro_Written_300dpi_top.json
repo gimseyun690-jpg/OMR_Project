@@ -4,6 +4,8 @@
   "form_name": "SeoulMetro_Written_Exam",
   "form_no": "SM_WRITTEN_300DPI_TOP_USER_SPEC_V1",
   "base_dpi": 300,
+  "width": 2480,
+  "height": 3508,
   "marker_location": "top",
   "global_offset_x": 0,
   "global_offset_y": 0,
@@ -11,7 +13,7 @@
     "block_size": 15,
     "C": 7,
     "threshold": 120,
-    "pixel_ratio": 0.05
+    "pixel_ratio": 0.09
   },
   "marker_detection": {
     "spacing_rel_max_top_bottom": 2.2
@@ -25,9 +27,6 @@
       "deskew_max_deg": 8.0,
       "use_marker_interpolation": false,
       "auto_y_search_px": 20,
-      "auto_dy_scale": true,
-      "row_scale_min": 0.9,
-      "row_scale_max": 1.1,
       "marker_start_index": 2,
       "digits": 8,
       "x_offset": 0,
@@ -43,9 +42,6 @@
       "marker_location": "top",
       "marker_start_index": 10,
       "auto_y_search_px": 20,
-      "auto_dy_scale": true,
-      "row_scale_min": 0.9,
-      "row_scale_max": 1.1,
       "digits": 4,
       "x_offset": 0,
       "y_offset": 953,
@@ -68,9 +64,6 @@
       "x_offset": 0,
       "y_offset": 330,
       "auto_y_search_px": 12,
-      "auto_dy_scale": true,
-      "row_scale_min": 0.9,
-      "row_scale_max": 1.1,
       "choice_dy": 70,
       "choice_y_offsets": [
         0,
@@ -141,6 +134,8 @@
     "choices": 5
   },
   "question_layout": {
+    "width": 2480,
+    "height": 3508,
     "x_offset": 0,
     "choice_dx": 59,
     "box_w": 35,
@@ -154,13 +149,6 @@
     "deskew_with_markers": true,
     "deskew_max_deg": 8.0,
     "use_marker_interpolation": false,
-    "auto_row_search": false,
-    "row_search_x_px": 8,
-    "row_search_y_px": 12,
-    "row_search_step": 2,
-    "adaptive_linear_scaling": true,
-    "row_scale_min": 0.9,
-    "row_scale_max": 1.1,
     "numbering_order": "column_major",
     "columns": 4,
     "fixed_anchor_mode": true,

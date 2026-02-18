@@ -87,43 +87,16 @@ class ReviewFlowMixin:
                                 marker_location=marker_location,
                             )
                         elif layout_mode == "side_marker":
-                            questions = self.pipeline.form_data.get("questions", [])
-                            if questions:
-                                questions = [
-                                    (q if isinstance(q, dict) else {"no": i + 1, "type": "vote"})
-                                    for i, q in enumerate(questions)
-                                ]
-                                for i, q in enumerate(questions):
-                                    if q.get("row_index") is None and q.get("y") is None:
-                                        q["row_index"] = i
-                            roi_params = self.pipeline.form_data.get("roi_params", {}) or {}
-                            marker_location = self.pipeline.form_data.get("marker_location", "left")
-                            _, _, debug_img, _ = self.pipeline.engine.analyze_side_marker_sheet(
-                                aligned_img, questions, roi_params, scale=scale, marker_location=marker_location
+                            questions, question_layout, marker_location = self.pipeline._build_legacy_side_marker_schema()
+                            _, _, debug_img, _ = self.pipeline.engine.analyze_marker_questions(
+                                aligned_img,
+                                questions,
+                                question_layout,
+                                scale=scale,
+                                marker_location=marker_location,
                             )
                         elif layout_mode == "timing_mark":
-                            timing_params = self.pipeline.form_data.get("timing_mark", {}) or {}
-                            left_ratio = float(timing_params.get("left_ratio", 0.08))
-                            x_offset_ratio = float(timing_params.get("x_offset_ratio", 0.3))
-                            box_w_ratio = float(timing_params.get("box_w_ratio", 0.04))
-                            box_h_ratio = float(timing_params.get("box_h_ratio", 0.02))
-                            pixel_ratio = float(timing_params.get("pixel_ratio", self.pipeline.engine.pixel_threshold))
-
-                            aligned_img, rows, anchor_x, xs_list = self.pipeline.engine.find_timing_marks_aligned(
-                                aligned_img, left_ratio=left_ratio
-                            )
-                            if rows:
-                                _, debug_img = self.pipeline.engine.read_answers(
-                                    aligned_img,
-                                    rows,
-                                    anchor_x=anchor_x,
-                                    x_offset_ratio=x_offset_ratio,
-                                    box_w_ratio=box_w_ratio,
-                                    box_h_ratio=box_h_ratio,
-                                    pixel_threshold=pixel_ratio,
-                                )
-                            else:
-                                debug_img = aligned_img
+                            debug_img = aligned_img
                         else:
                             rois = self.pipeline.form_manager.get_fixed_rois(scale=scale)
                             _, _, debug_img = self.pipeline.engine.analyze_sheet_cv(aligned_img, rois)
@@ -192,12 +165,14 @@ class ReviewFlowMixin:
         parsed = []
         normalized = str(result_str or "")
         is_legacy_binary = set(normalized).issubset({"0", "1", "2", "3"})
+        profile = self._resolve_error_editor_profile()
+        duplicate_marked = [0, 1] if profile in ("church", "rebuild") else []
         for i, char in enumerate(normalized):
             marked = []
             status = "정상"
 
             if char in ("X", "x"):
-                marked = [0, 1]
+                marked = list(duplicate_marked)
                 status = "중복"
             elif char == "3" and is_legacy_binary:
                 marked = [0, 1]
@@ -258,7 +233,12 @@ class ReviewFlowMixin:
             pass
 
         try:
-            _, _, fields_debug = self.pipeline.engine.analyze_custom_fields(base_img, fields, scale)
+            _, _, fields_debug = self.pipeline.engine.analyze_custom_fields(
+                base_img,
+                fields,
+                scale=scale,
+                layout=form_data,
+            )
             if fields_debug is None:
                 return debug_img
             if debug_img.shape[:2] != fields_debug.shape[:2]:
@@ -321,43 +301,16 @@ class ReviewFlowMixin:
                             marker_location=marker_location,
                         )
                     elif layout_mode == "side_marker":
-                        questions = self.pipeline.form_data.get("questions", [])
-                        if questions:
-                            questions = [
-                                (q if isinstance(q, dict) else {"no": i + 1, "type": "vote"})
-                                for i, q in enumerate(questions)
-                            ]
-                            for i, q in enumerate(questions):
-                                if q.get("row_index") is None and q.get("y") is None:
-                                    q["row_index"] = i
-                        roi_params = self.pipeline.form_data.get("roi_params", {}) or {}
-                        marker_location = self.pipeline.form_data.get("marker_location", "left")
-                        _, _, debug_img, _ = self.pipeline.engine.analyze_side_marker_sheet(
-                            aligned_img, questions, roi_params, scale=scale, marker_location=marker_location
+                        questions, question_layout, marker_location = self.pipeline._build_legacy_side_marker_schema()
+                        _, _, debug_img, _ = self.pipeline.engine.analyze_marker_questions(
+                            aligned_img,
+                            questions,
+                            question_layout,
+                            scale=scale,
+                            marker_location=marker_location,
                         )
                     elif layout_mode == "timing_mark":
-                        timing_params = self.pipeline.form_data.get("timing_mark", {}) or {}
-                        left_ratio = float(timing_params.get("left_ratio", 0.08))
-                        x_offset_ratio = float(timing_params.get("x_offset_ratio", 0.3))
-                        box_w_ratio = float(timing_params.get("box_w_ratio", 0.04))
-                        box_h_ratio = float(timing_params.get("box_h_ratio", 0.02))
-                        pixel_ratio = float(timing_params.get("pixel_ratio", self.pipeline.engine.pixel_threshold))
-
-                        aligned_img, rows, anchor_x, xs_list = self.pipeline.engine.find_timing_marks_aligned(
-                            aligned_img, left_ratio=left_ratio
-                        )
-                        if rows:
-                            _, debug_img = self.pipeline.engine.read_answers(
-                                aligned_img,
-                                rows,
-                                anchor_x=anchor_x,
-                                x_offset_ratio=x_offset_ratio,
-                                box_w_ratio=box_w_ratio,
-                                box_h_ratio=box_h_ratio,
-                                pixel_threshold=pixel_ratio,
-                            )
-                        else:
-                            debug_img = aligned_img
+                        debug_img = aligned_img
                     else:
                         rois = self.pipeline.form_manager.get_fixed_rois(scale=scale)
                         _, _, debug_img = self.pipeline.engine.analyze_sheet_cv(aligned_img, rois)

@@ -836,7 +836,12 @@ class OMRScannerApp(FluentWindow):
     def open_mark_setting(self):
         db_path = self.get_current_db()
         if db_path:
-            MarkSettingsDialog(self, db_path).exec_()
+            dlg = MarkSettingsDialog(self, db_path)
+            if dlg.exec_():
+                try:
+                    self.scan_interface.scanner_view.on_form_changed()
+                except Exception:
+                    pass
 
     def open_path_setting(self):
         db_path = self.get_current_db()
