@@ -300,7 +300,8 @@ class MarkerDetector:
 
         try:
             candidates: List[Marker] = []
-            for ratio in (0.10, 0.15, 0.20):
+            ratio_candidates = (0.07, 0.09, 0.11, 0.13) if loc in ("top", "bottom") else (0.10, 0.15, 0.20)
+            for ratio in ratio_candidates:
                 candidates = self._detect_in_roi(image, loc, ratio)
                 if len(candidates) >= int(min_count):
                     break

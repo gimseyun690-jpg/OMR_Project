@@ -41,7 +41,7 @@ class ImageProcessor:
 
             # 2) Hard cutoff: bright pixels (paper + red print) -> white.
             contrast_img = red_channel.copy()
-            contrast_img[contrast_img > 10] = 255
+            contrast_img[contrast_img > 130] = 255
             img_gray = contrast_img
         else:
             # Grayscale input fallback.
@@ -1515,6 +1515,4 @@ class OMRScanner:
             else:
                 is_ok = False
         return is_ok, info, debug_img
-
-
 
