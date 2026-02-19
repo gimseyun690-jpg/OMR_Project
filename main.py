@@ -32,8 +32,8 @@ try:
     os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "0"
     os.environ["QT_SCALE_FACTOR"] = "1"
     os.environ["QT_FONT_DPI"] = "96"
-    os.environ.setdefault("QT_OPENGL", "software")
-    os.environ.setdefault("QT_QUICK_BACKEND", "software")
+    # Avoid forcing software rendering because translucent/composited widgets can turn black on some GPUs.
+    os.environ.setdefault("QT_OPENGL", "dynamic")
 except Exception as e:
     print(f"[InitWarn] Qt scaling/style setup failed: {e}")
     _log_startup(f"[InitWarn] scaling/style setup failed: {e}")

@@ -41,6 +41,7 @@ class UiSetupMixin:
 
         # === 2. 하단 3분할 ===
         splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter = splitter
         splitter.setHandleWidth(5)
         splitter.setStyleSheet(SPLITTER_HANDLE)
 
@@ -63,6 +64,7 @@ class UiSetupMixin:
         splitter.setStretchFactor(1, 12)
         splitter.setStretchFactor(2, 2)
         splitter.setSizes([200, 1400, 230])
+        splitter.setCollapsible(1, False)
         splitter.setCollapsible(2, False)
 
         if self._is_compact_layout():
@@ -126,8 +128,29 @@ class UiSetupMixin:
 
     def showEvent(self, event):
         super().showEvent(event)
+        self.ensure_main_grid_visible()
         if self.current_db_path and not self.scan_in_progress:
             self._load_summary_from_db()
+
+    def ensure_main_grid_visible(self):
+        splitter = getattr(self, "main_splitter", None)
+        if splitter is not None:
+            sizes = splitter.sizes()
+            if len(sizes) >= 3 and sizes[1] < 240:
+                total = sum(sizes)
+                if total <= 0:
+                    total = max(splitter.width(), 1200)
+                left = max(170, int(total * 0.15))
+                right = max(210, int(total * 0.16))
+                center = max(560, total - left - right)
+                splitter.setSizes([left, center, right])
+
+        if hasattr(self, "grid_widget"):
+            self.grid_widget.show()
+            self.grid_widget.update()
+        if hasattr(self, "main_grid"):
+            self.main_grid.show()
+            self.main_grid.viewport().update()
 
 
     # 1. 좌표 가져오기(DB 연동 버전)

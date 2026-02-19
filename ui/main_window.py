@@ -4,6 +4,7 @@ from PySide2.QtCore import Qt, Signal, QPoint, QPointF, QSettings, QPropertyAnim
 from PySide2.QtWidgets import (
     QApplication,
     QWidget,
+    QMainWindow,
     QVBoxLayout,
     QHBoxLayout,
     QGridLayout,
@@ -17,10 +18,11 @@ from PySide2.QtWidgets import (
     QComboBox,
     QSpinBox,
     QGraphicsDropShadowEffect,
+    QStackedWidget,
 )
 
 from qfluentwidgets import (
-    FluentWindow,
+    NavigationInterface,
     NavigationItemPosition,
     FluentIcon as FIF,
     setTheme,
@@ -700,22 +702,19 @@ class SettingsInterface(QWidget):
         self.locale_changed.emit(label)
 
 
-class OMRScannerApp(FluentWindow):
+class OMRScannerApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        try:
-            self.setMicaEffectEnabled(False)
-        except Exception:
-            pass
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
         self.setStyleSheet(
-            "FluentWindow, QMainWindow, QFrame, QStackedWidget, QWidget {"
+            "QMainWindow, QFrame, QStackedWidget, QWidget {"
             " background-color: #FFFFFF; }"
         )
         self.setWindowTitle("OMR_PRO")
         self.resize(1280, 800)
+        self._build_shell()
 
         self._settings = QSettings("OMR", "OMRProject")
         self.current_db_path = None
@@ -733,6 +732,108 @@ class OMRScannerApp(FluentWindow):
         self._connect_signals()
         self._apply_saved_settings()
         self._auto_open_last_db()
+
+    def _build_shell(self):
+        root = QWidget(self)
+        root.setObjectName("mainRoot")
+        root.setAttribute(Qt.WA_TranslucentBackground, False)
+        root.setAttribute(Qt.WA_StyledBackground, True)
+        root.setAutoFillBackground(True)
+        self.setCentralWidget(root)
+
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        self.navigationInterface = NavigationInterface(root, showReturnButton=True)
+        self.navigationInterface.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.navigationInterface.setAttribute(Qt.WA_StyledBackground, True)
+        self.navigationInterface.setAutoFillBackground(True)
+        self.navigationInterface.setStyleSheet("NavigationInterface { background: #FFFFFF; background-color: #FFFFFF; }")
+        try:
+            self.navigationInterface.setAcrylicEnabled(False)
+        except Exception:
+            pass
+        self._enforce_navigation_panel_style()
+        panel = getattr(self.navigationInterface, "panel", None)
+        if panel is not None and hasattr(panel, "expandAni"):
+            try:
+                panel.expandAni.finished.connect(self._enforce_navigation_panel_style)
+            except Exception:
+                pass
+
+        self.stackedWidget = QStackedWidget(root)
+        self.stackedWidget.setObjectName("mainStackedWidget")
+        self.stackedWidget.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.stackedWidget.setAttribute(Qt.WA_StyledBackground, True)
+        self.stackedWidget.setAutoFillBackground(True)
+        self.stackedWidget.currentChanged.connect(self._on_current_interface_changed)
+
+        root_layout.addWidget(self.navigationInterface)
+        root_layout.addWidget(self.stackedWidget, 1)
+
+    def _enforce_navigation_panel_style(self):
+        panel = getattr(self.navigationInterface, "panel", None)
+        if panel is None:
+            return
+
+        panel.setAttribute(Qt.WA_TranslucentBackground, False)
+        panel.setAttribute(Qt.WA_StyledBackground, True)
+        panel.setAutoFillBackground(True)
+        panel.setObjectName("sideNavPanel")
+        try:
+            panel.setProperty("transparent", False)
+        except Exception:
+            pass
+
+        scroll_widget = getattr(panel, "scrollWidget", None)
+        if scroll_widget is not None:
+            scroll_widget.setObjectName("sideNavScrollWidget")
+            scroll_widget.setAttribute(Qt.WA_TranslucentBackground, False)
+            scroll_widget.setAttribute(Qt.WA_StyledBackground, True)
+            scroll_widget.setAutoFillBackground(True)
+
+        panel.setStyleSheet(
+            """
+            #sideNavPanel, #sideNavPanel[menu=true], #sideNavPanel[menu=false], #sideNavPanel[transparent=true] {
+                background: #FFFFFF;
+                background-color: #FFFFFF;
+                border: 1px solid #E1E7EE;
+                border-top-right-radius: 7px;
+                border-bottom-right-radius: 7px;
+            }
+            #sideNavPanel QScrollArea, #sideNavScrollWidget {
+                background: #FFFFFF;
+                background-color: #FFFFFF;
+                border: none;
+            }
+            """
+        )
+
+    def _fix_scanner_grid_after_layout_change(self):
+        if hasattr(self, "scan_interface"):
+            try:
+                self.scan_interface.scanner_view.ensure_main_grid_visible()
+            except Exception:
+                pass
+
+    def _on_current_interface_changed(self, index: int):
+        widget = self.stackedWidget.widget(index)
+        if widget is None:
+            return
+        try:
+            self.navigationInterface.setCurrentItem(widget.objectName())
+        except Exception:
+            pass
+
+    def switchTo(self, interface: QWidget):
+        self.stackedWidget.setCurrentWidget(interface)
+        try:
+            self.navigationInterface.setCurrentItem(interface.objectName())
+        except Exception:
+            pass
+        if interface is getattr(self, "scan_interface", None):
+            self._fix_scanner_grid_after_layout_change()
 
     def _init_navigation(self):
         self.addSubInterface(
@@ -783,7 +884,7 @@ class OMRScannerApp(FluentWindow):
         )
         self._nav_routes.append(route_key)
         if selected:
-            self.stackedWidget.setCurrentWidget(interface)
+            self.switchTo(interface)
 
     def _connect_signals(self):
         self.home_interface.open_file_settings.connect(self.open_file_setting)

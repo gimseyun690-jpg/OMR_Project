@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import os
+import time
 
 from PySide2.QtCore import Qt, Slot
 from PySide2.QtWidgets import QProgressDialog, QMessageBox, QFileDialog
@@ -75,12 +76,16 @@ class DemoFlowMixin:
             files=files,
             place=current_place,
             room=current_room,
-            start_read_num=start_read_num
+            start_read_num=start_read_num,
+            ui_update_interval_sec=0.05,
+            result_emit_interval_sec=0.05,
+            result_ui_batch_size=20,
         )
 
         # 연결
         self.demo_progress.canceled.connect(self.demo_worker.cancel)
         self.demo_worker.progress.connect(self._on_demo_progress)
+        self.demo_worker.result_rows.connect(self._on_demo_rows)
         self.demo_worker.result_row.connect(self._on_demo_row)
         self.demo_worker.finished.connect(self._on_demo_finished)
         self.demo_worker.error.connect(self._on_demo_error)
@@ -94,20 +99,43 @@ class DemoFlowMixin:
             self.demo_progress.setLabelText(f"이미지 불러오는 중... ({current}/{total})\n{filename}")
 
     def _on_demo_row(self, row_data):
-        # UI에 결과 반영 (메인 스레드)
-        self.main_grid.add_row_data(row_data)
+        self._on_demo_rows([row_data])
+
+    def _on_demo_rows(self, rows_data):
+        if not rows_data:
+            return
+
+        self.main_grid.setUpdatesEnabled(False)
         try:
-            row_read_num = int(row_data[0])
-            self.session_end_read_num = max(int(getattr(self, "session_end_read_num", 0)), row_read_num)
-            self.next_read_num = max(int(getattr(self, "next_read_num", 1)), row_read_num + 1)
-        except Exception:
-            row_read_num = None
-        self.total_read += 1
-        self.current_session_count += 1
-        if len(row_data) > 7 and hasattr(self.control_panel, "image_viewer"):
+            for row_data in rows_data:
+                self.main_grid.add_row_data(row_data)
+                try:
+                    row_read_num = int(row_data[0])
+                    self.session_end_read_num = max(int(getattr(self, "session_end_read_num", 0)), row_read_num)
+                    self.next_read_num = max(int(getattr(self, "next_read_num", 1)), row_read_num + 1)
+                except Exception:
+                    pass
+                self.total_read += 1
+                self.current_session_count += 1
+        finally:
+            self.main_grid.setUpdatesEnabled(True)
+
+        # 이미지 미리보기는 시간 기반으로 제한해 메인 스레드 부하를 줄임
+        now = time.monotonic()
+        last_ts = float(getattr(self, "_last_demo_preview_ts", 0.0))
+        last_row = rows_data[-1]
+        if (
+            len(last_row) > 7
+            and hasattr(self.control_panel, "image_viewer")
+            and (now - last_ts >= 0.2)
+        ):
             self.control_panel.image_viewer.set_image_path(
-                row_data[7], engine=getattr(self, "pipeline", None).engine if hasattr(self, "pipeline") else None, use_warp=True
+                last_row[7],
+                engine=getattr(self, "pipeline", None).engine if hasattr(self, "pipeline") else None,
+                use_warp=True,
             )
+            self._last_demo_preview_ts = now
+
         self.lbl_total.setText(str(self.total_read))
         self.lbl_cur_cnt.setText(str(self.current_session_count))
         self.control_panel.txt_temp.setText(str(self.total_read))
