@@ -13,10 +13,82 @@ logger = logging.getLogger(__name__)
 class MarkerDetector:
     def __init__(self, marker_thresh: int = 215):
         self.marker_thresh = int(marker_thresh)
+        self.spacing_rel_std_max = 0.30
+        self.spacing_rel_max_top_bottom: Optional[float] = None
+        self.spacing_rel_max_left_right: Optional[float] = None
+        self.ratio_candidates_top_bottom: Tuple[float, ...] = (0.07, 0.09, 0.11, 0.13)
+        self.ratio_candidates_left_right: Tuple[float, ...] = (0.10, 0.15, 0.20)
 
-    def configure(self, marker_thresh: Optional[int] = None) -> None:
+    @staticmethod
+    def _parse_ratio_candidates(raw: Any, fallback: Tuple[float, ...]) -> Tuple[float, ...]:
+        if not isinstance(raw, (list, tuple)):
+            return fallback
+        vals: List[float] = []
+        for item in raw:
+            try:
+                v = float(item)
+            except Exception:
+                continue
+            if not np.isfinite(v):
+                continue
+            if v <= 0.01 or v >= 0.50:
+                continue
+            vals.append(float(v))
+        if not vals:
+            return fallback
+        vals = sorted(set(vals))
+        return tuple(float(v) for v in vals)
+
+    def configure(
+        self,
+        marker_thresh: Optional[int] = None,
+        detection_config: Optional[Dict[str, Any]] = None,
+    ) -> None:
         if marker_thresh is not None:
             self.marker_thresh = int(marker_thresh)
+        if isinstance(detection_config, dict):
+            # A new form config should fully re-define detector tuning.
+            self.spacing_rel_std_max = 0.30
+            self.spacing_rel_max_top_bottom = None
+            self.spacing_rel_max_left_right = None
+            self.ratio_candidates_top_bottom = (0.07, 0.09, 0.11, 0.13)
+            self.ratio_candidates_left_right = (0.10, 0.15, 0.20)
+
+            raw_std = detection_config.get("spacing_rel_std_max", None)
+            if raw_std is not None:
+                try:
+                    std_v = float(raw_std)
+                    if np.isfinite(std_v) and std_v > 0.0:
+                        self.spacing_rel_std_max = float(std_v)
+                except Exception:
+                    pass
+
+            raw_tb = detection_config.get("spacing_rel_max_top_bottom", None)
+            if raw_tb is not None:
+                try:
+                    tb_v = float(raw_tb)
+                    if np.isfinite(tb_v) and tb_v > 1.0:
+                        self.spacing_rel_max_top_bottom = float(tb_v)
+                except Exception:
+                    pass
+
+            raw_lr = detection_config.get("spacing_rel_max_left_right", None)
+            if raw_lr is not None:
+                try:
+                    lr_v = float(raw_lr)
+                    if np.isfinite(lr_v) and lr_v > 1.0:
+                        self.spacing_rel_max_left_right = float(lr_v)
+                except Exception:
+                    pass
+
+            self.ratio_candidates_top_bottom = self._parse_ratio_candidates(
+                detection_config.get("ratio_candidates_top_bottom", None),
+                self.ratio_candidates_top_bottom,
+            )
+            self.ratio_candidates_left_right = self._parse_ratio_candidates(
+                detection_config.get("ratio_candidates_left_right", None),
+                self.ratio_candidates_left_right,
+            )
 
     @staticmethod
     def _roi_from_location(img_h: int, img_w: int, location: str, ratio: float) -> Tuple[int, int, int, int]:
@@ -76,7 +148,12 @@ class MarkerDetector:
         return (rel_std_w <= size_std_max) and (rel_std_h <= size_std_max)
 
     @staticmethod
-    def _validate_axis_spacing(group: Sequence[Marker], axis_key: str) -> bool:
+    def _validate_axis_spacing(
+        group: Sequence[Marker],
+        axis_key: str,
+        spacing_rel_std_max: float = 0.30,
+        spacing_rel_max: Optional[float] = None,
+    ) -> bool:
         if not group or len(group) < 3:
             return bool(group)
         coords = sorted([int(getattr(m, axis_key, 0)) for m in group])
@@ -87,7 +164,17 @@ class MarkerDetector:
         if median_gap <= 1e-6:
             return False
         rel_std_gap = float(np.std(gaps)) / median_gap
-        return rel_std_gap <= 0.30
+        if rel_std_gap > float(spacing_rel_std_max):
+            return False
+
+        if spacing_rel_max is not None and gaps.size >= 2:
+            min_gap = float(np.min(gaps))
+            max_gap = float(np.max(gaps))
+            if min_gap <= 1e-6:
+                return False
+            if (max_gap / min_gap) > float(spacing_rel_max):
+                return False
+        return True
 
     @staticmethod
     def _fallback_horizontal_candidates(cands: Sequence[Marker], location: str) -> List[Marker]:
@@ -264,7 +351,13 @@ class MarkerDetector:
             span = float(max(int(getattr(c, span_key, 0)) for c in g) - min(int(getattr(c, span_key, 0)) for c in g))
             if span < span_limit:
                 continue
-            if not self._validate_axis_spacing(g, span_key):
+            spacing_rel_max = self.spacing_rel_max_top_bottom if location in ("top", "bottom") else self.spacing_rel_max_left_right
+            if not self._validate_axis_spacing(
+                g,
+                span_key,
+                spacing_rel_std_max=self.spacing_rel_std_max,
+                spacing_rel_max=spacing_rel_max,
+            ):
                 continue
 
             mean_ring = float(np.mean([float(c.ring_ratio) for c in g]))
@@ -300,7 +393,9 @@ class MarkerDetector:
 
         try:
             candidates: List[Marker] = []
-            ratio_candidates = (0.07, 0.09, 0.11, 0.13) if loc in ("top", "bottom") else (0.10, 0.15, 0.20)
+            ratio_candidates = self.ratio_candidates_top_bottom if loc in ("top", "bottom") else self.ratio_candidates_left_right
+            if not ratio_candidates:
+                ratio_candidates = (0.07, 0.09, 0.11, 0.13) if loc in ("top", "bottom") else (0.10, 0.15, 0.20)
             for ratio in ratio_candidates:
                 candidates = self._detect_in_roi(image, loc, ratio)
                 if len(candidates) >= int(min_count):

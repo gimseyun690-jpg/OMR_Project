@@ -13,11 +13,30 @@ from logic.omr_types import Marker, QuestionResult
 logger = logging.getLogger(__name__)
 
 class ImageProcessor:
-    def __init__(self, block_size: int = 15, c_value: int = 7):
+    def __init__(
+        self,
+        block_size: int = 15,
+        c_value: int = 7,
+        red_cutoff: int = 130,
+        open_kernel: int = 3,
+    ):
         self.block_size = int(block_size) if int(block_size) % 2 == 1 else int(block_size) + 1
         self.c_value = int(c_value)
+        self.red_cutoff = int(np.clip(int(red_cutoff), 0, 255))
+        kernel = int(open_kernel)
+        if kernel <= 0:
+            kernel = 1
+        if kernel % 2 == 0:
+            kernel += 1
+        self.open_kernel = int(kernel)
 
-    def configure(self, block_size: Optional[int] = None, c_value: Optional[int] = None) -> None:
+    def configure(
+        self,
+        block_size: Optional[int] = None,
+        c_value: Optional[int] = None,
+        red_cutoff: Optional[int] = None,
+        open_kernel: Optional[int] = None,
+    ) -> None:
         if block_size is not None:
             b = int(block_size)
             if b % 2 == 0:
@@ -25,6 +44,15 @@ class ImageProcessor:
             self.block_size = max(3, b)
         if c_value is not None:
             self.c_value = int(c_value)
+        if red_cutoff is not None:
+            self.red_cutoff = int(np.clip(int(red_cutoff), 0, 255))
+        if open_kernel is not None:
+            k = int(open_kernel)
+            if k <= 0:
+                k = 1
+            if k % 2 == 0:
+                k += 1
+            self.open_kernel = int(k)
 
     def preprocess(self, img: Optional[np.ndarray]) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
@@ -41,24 +69,34 @@ class ImageProcessor:
 
             # 2) Hard cutoff: bright pixels (paper + red print) -> white.
             contrast_img = red_channel.copy()
-            contrast_img[contrast_img > 130] = 255
+            contrast_img[contrast_img > int(self.red_cutoff)] = 255
             img_gray = contrast_img
         else:
             # Grayscale input fallback.
             img_gray = cv2.add(work_img, 30)
 
-        # 3) Binarization (fixed block_size=15, C=5).
+        block_size = int(self.block_size)
+        if block_size % 2 == 0:
+            block_size += 1
+        block_size = max(3, block_size)
+        c_value = int(self.c_value)
+
+        # 3) Binarization (configured block_size/C).
         binary_img = cv2.adaptiveThreshold(
             img_gray,
             255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV,
-            15,
-            5,
+            block_size,
+            c_value,
         )
 
         # 4) Small-noise cleanup.
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        kernel_size = int(self.open_kernel)
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel_size = max(1, kernel_size)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
         processed_img = cv2.morphologyEx(binary_img, cv2.MORPH_OPEN, kernel, iterations=1)
         return work_img, processed_img
 
@@ -1515,4 +1553,3 @@ class OMRScanner:
             else:
                 is_ok = False
         return is_ok, info, debug_img
-

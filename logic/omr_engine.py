@@ -163,7 +163,10 @@ class OMREngine:
         self.threshold_value = int(self.marker_thresh)
 
         self.image_processor.configure(block_size=self.block_size, c_value=self.C)
-        self.marker_detector.configure(marker_thresh=self.marker_thresh)
+        self.marker_detector.configure(
+            marker_thresh=self.marker_thresh,
+            detection_config=self.marker_detection,
+        )
         self.scanner.configure(
             pixel_threshold=self.pixel_threshold,
             global_offset_x=self.global_offset_x,
