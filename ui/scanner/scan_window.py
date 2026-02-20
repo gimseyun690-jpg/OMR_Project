@@ -17,6 +17,9 @@ class ScannerReadingView(QWidget, UiSetupMixin, GridSyncMixin, ReviewFlowMixin, 
     def set_project_db(self, db_path):
         self.set_current_db(db_path)
 
+    def set_demo_high_performance_mode(self, enabled: bool):
+        self.demo_high_performance_mode = bool(enabled)
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -36,6 +39,7 @@ class ScannerReadingView(QWidget, UiSetupMixin, GridSyncMixin, ReviewFlowMixin, 
         self.last_scan_params = None
         self.last_error_code = ""
         self.show_error_popups = True
+        self.demo_high_performance_mode = False
         self.error_editor_profile = "church"
         self.current_summary_row = None
         self.session_start_room_text = None

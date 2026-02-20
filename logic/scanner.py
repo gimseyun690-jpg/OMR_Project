@@ -388,6 +388,79 @@ class OMRScanner:
             return "single_choice"
         return raw
 
+    @staticmethod
+    def _parse_finite_float(
+        value: Any,
+        default: float,
+        min_value: Optional[float] = None,
+        max_value: Optional[float] = None,
+    ) -> float:
+        try:
+            parsed = float(value)
+        except Exception:
+            parsed = float(default)
+        if not np.isfinite(parsed):
+            parsed = float(default)
+        if min_value is not None:
+            parsed = max(float(min_value), parsed)
+        if max_value is not None:
+            parsed = min(float(max_value), parsed)
+        return float(parsed)
+
+    def _apply_marker_deskew(
+        self,
+        image: Optional[np.ndarray],
+        markers: Sequence[Marker],
+        marker_location: str,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Optional[np.ndarray], List[Marker], bool]:
+        marker_list = list(markers or [])
+        if image is None or len(marker_list) < 2:
+            return image, marker_list, False
+
+        cfg = config if isinstance(config, dict) else {}
+        enabled = self._to_bool(cfg.get("deskew_with_markers", False), False)
+        if not enabled:
+            return image, marker_list, False
+
+        max_deg = self._parse_finite_float(cfg.get("deskew_max_deg", 8.0), 8.0, min_value=0.2, max_value=25.0)
+        min_deg = self._parse_finite_float(cfg.get("deskew_min_deg", 0.05), 0.05, min_value=0.0, max_value=max_deg)
+        inlier_pct = self._parse_finite_float(
+            cfg.get("deskew_inlier_percentile", 85.0),
+            85.0,
+            min_value=60.0,
+            max_value=98.0,
+        )
+
+        deskewed = self.geometry_manager.deskew_by_markers(
+            image,
+            marker_list,
+            marker_location=marker_location,
+            max_abs_deg=max_deg,
+            min_abs_deg=min_deg,
+            inlier_percentile=inlier_pct,
+        )
+        if deskewed is None or deskewed is image:
+            return image, marker_list, False
+
+        refreshed = list(
+            self.marker_detector.find_markers(
+                deskewed,
+                location=marker_location,
+                min_count=3,
+            )
+            or []
+        )
+
+        before_count = len(marker_list)
+        min_required = max(3, min(before_count, 6))
+        if len(refreshed) < min_required:
+            return image, marker_list, False
+        if before_count >= 6 and (len(refreshed) + 2) < before_count:
+            return image, marker_list, False
+
+        return deskewed, refreshed, True
+
     def _compute_global_scale_factors(
         self,
         work_img: Optional[np.ndarray],
@@ -786,6 +859,13 @@ class OMRScanner:
             )
             if rotated_img is None:
                 return "ERR", [], None, "IMG_NONE"
+
+            rotated_img, markers, _ = self._apply_marker_deskew(
+                rotated_img,
+                markers,
+                marker_location=marker_location,
+                config=layout,
+            )
 
             work_img, processed_img = self.image_processor.preprocess(rotated_img)
             if work_img is None or processed_img is None:
@@ -1409,6 +1489,7 @@ class OMRScanner:
         if original_img is None or not fields:
             return False, {}, None
 
+        full_layout = layout if isinstance(layout, dict) else {}
         marker_field_types = {"marker_digit_columns", "marker_single_choice_column"}
         normalized_fields: List[Dict[str, Any]] = []
         for field in fields:
@@ -1448,6 +1529,18 @@ class OMRScanner:
             )
             if base_img is None:
                 return False, {}, None
+
+            deskew_cfg = dict(full_layout)
+            for key in ("deskew_with_markers", "deskew_max_deg", "deskew_min_deg", "deskew_inlier_percentile"):
+                if marker_field.get(key) is not None:
+                    deskew_cfg[key] = marker_field.get(key)
+            base_img, markers, _ = self._apply_marker_deskew(
+                base_img,
+                markers,
+                marker_location=marker_location,
+                config=deskew_cfg,
+            )
+
             axis_key = "cx" if marker_location in ("top", "bottom") else "cy"
             marker_axis = sorted(
                 list(markers or []),
@@ -1482,7 +1575,6 @@ class OMRScanner:
                 if len(interp_axis) > len(marker_axis_for_decode):
                     marker_axis_for_decode = sorted(interp_axis, key=lambda m: int(getattr(m, axis_key, 0)))
 
-        full_layout = layout if isinstance(layout, dict) else {}
         global_scale_x, global_scale_y = self._compute_global_scale_factors(
             work_img,
             marker_axis_for_decode,

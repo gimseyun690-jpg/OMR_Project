@@ -28,6 +28,8 @@ class ScanPipeline:
         
         self.candidate_enabled = False
         self.warp_enabled = True
+        # Master switch: when False, marker-based deskew is forcibly disabled.
+        self.marker_deskew_enabled = True
         
         # [수정] DPI는 폼 데이터의 기준 DPI를 확인하기 위한 용도로 사용
         self.system_dpi = 150 
@@ -164,6 +166,9 @@ class ScanPipeline:
 
     def set_auto_scale_dpi(self, enabled: bool):
         self.auto_scale_dpi = bool(enabled)
+
+    def set_marker_deskew_enabled(self, enabled: bool):
+        self.marker_deskew_enabled = bool(enabled)
 
     # ====== 헬퍼 메서드 ======
     def _status_to_code(self, status: str | None) -> str:
@@ -316,7 +321,9 @@ class ScanPipeline:
                         if "question_groups" in self.form_data
                         else self.form_data.get("questions", [])
                     )
-                    question_layout = self.form_data.get("question_layout", {}) or {}
+                    question_layout = dict(self.form_data.get("question_layout", {}) or {})
+                    if not self.marker_deskew_enabled:
+                        question_layout["deskew_with_markers"] = False
                     marker_location = self.form_data.get("marker_location", "left")
 
                     status, results, debug_img, error_reason = self.engine.analyze_marker_questions(
@@ -330,6 +337,9 @@ class ScanPipeline:
 
                 elif layout_mode == "side_marker":
                     questions, question_layout, marker_location = self._build_legacy_side_marker_schema()
+                    if not self.marker_deskew_enabled:
+                        question_layout = dict(question_layout)
+                        question_layout["deskew_with_markers"] = False
                     status, results, debug_img, error_reason = self.engine.analyze_marker_questions(
                         aligned_img,
                         questions,
@@ -363,11 +373,14 @@ class ScanPipeline:
             # even if objective answers contain errors.
             if self.candidate_enabled:
                 if isinstance(self.form_data, dict) and "fields" in self.form_data:
+                    candidate_layout = dict(self.form_data)
+                    if not self.marker_deskew_enabled:
+                        candidate_layout["deskew_with_markers"] = False
                     c_ok, c_info, c_debug = self.engine.analyze_custom_fields(
                         analysis_img,
                         self.form_data.get("fields", []),
                         scale=scale,
-                        layout=self.form_data,
+                        layout=candidate_layout,
                     )
                     candidate_info = c_info
 

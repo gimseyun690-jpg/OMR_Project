@@ -120,7 +120,7 @@ class GridSyncMixin:
     # -------------------------------------------------------------------------
     def _item(self, text):
         """테이블 아이템 생성 헬퍼."""
-        item = QTableWidgetItem(text)
+        item = QTableWidgetItem(str(text) if text is not None else "")
         item.setTextAlignment(Qt.AlignCenter)
         return item
 
@@ -156,7 +156,7 @@ class GridSyncMixin:
             return
         for rn in read_nums:
             row = self._get_row_data_by_read_num(rn)
-            if delete_images and row and row[4] and os.path.exists(row[4]):
+            if delete_images and row and len(row) > 4 and row[4] and os.path.exists(row[4]):
                 try:
                     os.remove(row[4])
                 except Exception as e:
@@ -339,7 +339,10 @@ class GridSyncMixin:
             return
         rn = read_nums[0]
         self.controller.update_scan_meta(self.current_db_path, rn, image_path=new_path)
-        r = self._get_selected_rows()[0]
+        selected_rows = self._get_selected_rows()
+        if not selected_rows:
+            return
+        r = selected_rows[0]
         item_path = self.main_grid.item(r, 7)
         item_name = self.main_grid.item(r, 8)
         if item_path:
@@ -524,8 +527,20 @@ class GridSyncMixin:
 
         action = menu.exec_(self.main_grid.viewport().mapToGlobal(pos))
         if action == act_review:
-            rn = self._get_selected_read_nums()[0]
-            self._open_review_for_row(self._get_row_data_by_read_num(rn))
+            read_nums = self._get_selected_read_nums()
+            if not read_nums:
+                QMessageBox.information(self, "안내", "검토할 항목을 다시 선택해주세요.")
+                return
+            rn = read_nums[0]
+            try:
+                row_data = self._get_row_data_by_read_num(rn)
+                if not row_data:
+                    QMessageBox.warning(self, "오류", f"판독번호 {rn} 데이터를 찾을 수 없습니다.")
+                    return
+                self._open_review_for_row(row_data)
+            except Exception as e:
+                self._set_last_error_message(str(e))
+                QMessageBox.critical(self, "오류", f"판독결과 조회/수정 중 오류가 발생했습니다.\n{e}")
         elif action == act_copy:
             self._copy_selected_rows()
         elif action == act_del_all:

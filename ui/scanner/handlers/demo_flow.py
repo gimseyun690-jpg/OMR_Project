@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
-import time
 
 from PySide2.QtCore import Qt, Slot
-from PySide2.QtWidgets import QProgressDialog, QMessageBox, QFileDialog
+from PySide2.QtWidgets import QFileDialog, QMessageBox, QProgressDialog
+
 from logic.services.tasks.scan_tasks import DemoWorker
 
 
@@ -32,9 +32,6 @@ class DemoFlowMixin:
             QMessageBox.information(self, "알림", "선택한 폴더에 이미지가 없습니다.")
             return
 
-        # 이미지 불러오기 시 현재 시험실 유지
-
-        # UI 잠금
         self.control_panel.btn_scan.setEnabled(False)
         self.control_panel.btn_check.setEnabled(False)
         self.control_panel.btn_demo.setEnabled(False)
@@ -61,7 +58,6 @@ class DemoFlowMixin:
             "room_index": self.cb_room.currentIndex(),
         }
 
-        # 진행 표시 다이얼로그
         self.demo_progress = QProgressDialog("이미지 읽기 준비중...", "취소", 0, len(files), self)
         self.demo_progress.setWindowTitle("이미지 불러오기")
         self.demo_progress.setWindowModality(Qt.WindowModal)
@@ -69,8 +65,11 @@ class DemoFlowMixin:
         self.demo_progress.setAutoReset(False)
         self.demo_progress.show()
 
-        # 워커 생성
         start_read_num = self.session_start_read_num - 1
+        max_workers = None
+        if bool(getattr(self, "demo_high_performance_mode", False)):
+            cpu_total = max(1, (os.cpu_count() or 1))
+            max_workers = max(1, cpu_total - 1)
         self.demo_worker = DemoWorker(
             controller=self.controller,
             files=files,
@@ -80,13 +79,15 @@ class DemoFlowMixin:
             ui_update_interval_sec=0.05,
             result_emit_interval_sec=0.05,
             result_ui_batch_size=20,
+            preview_emit_interval_sec=0.20,
+            max_workers=max_workers,
         )
 
-        # 연결
         self.demo_progress.canceled.connect(self.demo_worker.cancel)
         self.demo_worker.progress.connect(self._on_demo_progress)
         self.demo_worker.result_rows.connect(self._on_demo_rows)
         self.demo_worker.result_row.connect(self._on_demo_row)
+        self.demo_worker.preview_ready.connect(self._on_demo_preview)
         self.demo_worker.finished.connect(self._on_demo_finished)
         self.demo_worker.error.connect(self._on_demo_error)
 
@@ -120,29 +121,17 @@ class DemoFlowMixin:
         finally:
             self.main_grid.setUpdatesEnabled(True)
 
-        # 이미지 미리보기는 시간 기반으로 제한해 메인 스레드 부하를 줄임
-        now = time.monotonic()
-        last_ts = float(getattr(self, "_last_demo_preview_ts", 0.0))
-        last_row = rows_data[-1]
-        if (
-            len(last_row) > 7
-            and hasattr(self.control_panel, "image_viewer")
-            and (now - last_ts >= 0.2)
-        ):
-            self.control_panel.image_viewer.set_image_path(
-                last_row[7],
-                engine=getattr(self, "pipeline", None).engine if hasattr(self, "pipeline") else None,
-                use_warp=True,
-            )
-            self._last_demo_preview_ts = now
-
         self.lbl_total.setText(str(self.total_read))
         self.lbl_cur_cnt.setText(str(self.current_session_count))
         self.control_panel.txt_temp.setText(str(self.total_read))
         self.main_grid.scrollToBottom()
 
+    def _on_demo_preview(self, image_path, jpeg_bytes):
+        del image_path
+        if hasattr(self.control_panel, "image_viewer"):
+            self.control_panel.image_viewer.set_preview_jpeg_bytes(jpeg_bytes)
+
     def _on_demo_finished(self, ok, fail):
-        # UI 복원
         if hasattr(self, "demo_progress") and self.demo_progress:
             self.demo_progress.close()
 
@@ -200,4 +189,3 @@ class DemoFlowMixin:
 
         self._set_last_error_message(msg)
         self._show_error_popup("이미지 불러오기 오류", msg, critical=True)
-

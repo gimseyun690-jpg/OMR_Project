@@ -85,7 +85,17 @@ class ScanFlowMixin:
         my_hwnd = int(self.winId())
         # [수정] 스캐너 생성 시 save_folder 전달
         dpi = getattr(self.pipeline, "dpi", 150)
-        self.worker = ScanWorker(my_hwnd, save_folder, dpi=dpi)
+        scanner_backend = str(self.controller.get_setting(self.current_db_path, "scanner_backend", "auto") or "auto").strip()
+        scanner_source_hint = str(self.controller.get_setting(self.current_db_path, "scanner_source_hint", "") or "").strip()
+        scanner_backend_order = str(self.controller.get_setting(self.current_db_path, "scanner_backend_order", "") or "").strip()
+        self.worker = ScanWorker(
+            my_hwnd,
+            save_folder,
+            dpi=dpi,
+            scanner_backend=scanner_backend,
+            scanner_source_hint=scanner_source_hint or None,
+            scanner_backend_order=scanner_backend_order or None,
+        )
         
         self.worker.image_scanned.connect(self.on_image_received)
         self.worker.scan_finished.connect(self.on_finished)
@@ -128,6 +138,11 @@ class ScanFlowMixin:
 
     def _on_analyze_result(self, row_data):
         self.pending_analyze = max(self.pending_analyze - 1, 0)
+        if not isinstance(row_data, (list, tuple)):
+            self._set_last_error_message("분석 결과 형식이 잘못되어 건너뜀")
+            if self.pending_analyze == 0:
+                self._maybe_start_auto_review()
+            return
         try:
             read_num = int(row_data[0])
         except Exception:
@@ -163,6 +178,8 @@ class ScanFlowMixin:
             self.next_emit_read_num += 1
 
     def _append_row(self, row_data):
+        if not isinstance(row_data, (list, tuple)):
+            return
         if len(row_data) > 5 and row_data[5] == "타이밍 마크 오류":
             self._show_timing_mark_error(row_data[7], row_data[5])
         if len(row_data) > 5 and row_data[5] != "완료":
@@ -194,7 +211,7 @@ class ScanFlowMixin:
             rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             h, w = rgb.shape[:2]
             bytes_per_line = w * 3
-            qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+            qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
             pixmap = QPixmap.fromImage(qimg)
             max_w = 900
             if pixmap.width() > max_w:

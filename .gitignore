@@ -69,6 +69,8 @@ tmp/
 temp/
 output/
 results/
+!ui/results/
+!ui/results/*.py
 
 ################################
 # 모델 / 캐시 / 자동 생성 데이터

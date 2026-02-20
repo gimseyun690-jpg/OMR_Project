@@ -30,12 +30,13 @@ class ReviewSummarySignals(QObject):
 
 
 class ReviewSummaryTask(QRunnable):
-    def __init__(self, db, db_path, start, end):
+    def __init__(self, db, db_path, start, end, profile=""):
         super().__init__()
         self.db = db
         self.db_path = db_path
         self.start = start
         self.end = end
+        self.profile = str(profile or "").strip().lower()
         self.signals = ReviewSummarySignals()
 
     def run(self):
@@ -71,7 +72,13 @@ class ReviewSummaryTask(QRunnable):
                 invalid_cnt += 1
             is_legacy_binary = set(normalized_result).issubset({"0", "1", "2", "3"})
             has_blank = "0" in normalized_result
-            has_dup = ("X" in normalized_result) or ("3" in normalized_result and is_legacy_binary)
+            # Legacy "3=duplicate" is valid only for church/rebuild historical data.
+            legacy_three_dup = (
+                self.profile in ("church", "rebuild")
+                and ("3" in normalized_result)
+                and is_legacy_binary
+            )
+            has_dup = ("X" in normalized_result) or legacy_three_dup
             if has_blank or has_dup:
                 needs_review = True
                 if has_dup:

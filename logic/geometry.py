@@ -107,6 +107,9 @@ class GeometryManager:
         image: Optional[np.ndarray],
         rows: Sequence[float],
         xs_list: Sequence[float],
+        max_abs_deg: float = 12.0,
+        min_abs_deg: float = 0.05,
+        inlier_percentile: float = 85.0,
     ) -> Optional[np.ndarray]:
         if image is None or rows is None or xs_list is None:
             return image
@@ -116,6 +119,30 @@ class GeometryManager:
         h, w = image.shape[:2]
         if h < 2 or w < 2:
             return image
+
+        try:
+            max_abs_deg_f = float(max_abs_deg)
+        except Exception:
+            max_abs_deg_f = 12.0
+        if not np.isfinite(max_abs_deg_f):
+            max_abs_deg_f = 12.0
+        max_abs_deg_f = float(np.clip(abs(max_abs_deg_f), 0.2, 45.0))
+
+        try:
+            min_abs_deg_f = float(min_abs_deg)
+        except Exception:
+            min_abs_deg_f = 0.05
+        if not np.isfinite(min_abs_deg_f):
+            min_abs_deg_f = 0.05
+        min_abs_deg_f = float(np.clip(abs(min_abs_deg_f), 0.0, max_abs_deg_f))
+
+        try:
+            inlier_pct = float(inlier_percentile)
+        except Exception:
+            inlier_pct = 85.0
+        if not np.isfinite(inlier_pct):
+            inlier_pct = 85.0
+        inlier_pct = float(np.clip(inlier_pct, 60.0, 98.0))
 
         try:
             y = np.asarray(rows, dtype=np.float32).reshape(-1)
@@ -147,7 +174,7 @@ class GeometryManager:
             denom = (n0**2 + n1**2) ** 0.5 + 1e-9
             d = np.abs((pts[:, 0, 0] - x0) * n0 + (pts[:, 0, 1] - y0) * n1) / denom
             if len(d) > 5:
-                keep_thr = np.percentile(d, 85.0)
+                keep_thr = np.percentile(d, inlier_pct)
                 inliers = pts[d <= keep_thr]
                 if len(inliers) >= 2:
                     vx, vy, x0, y0 = _fit_line(inliers)
@@ -161,7 +188,7 @@ class GeometryManager:
             elif rotate_deg < -90.0:
                 rotate_deg += 180.0
 
-            if abs(rotate_deg) > 12.0 or abs(rotate_deg) < 0.05:
+            if abs(rotate_deg) > max_abs_deg_f or abs(rotate_deg) < min_abs_deg_f:
                 return image
 
             pivot_y = float(np.clip(np.median(y), 0.0, float(h - 1)))
@@ -186,6 +213,9 @@ class GeometryManager:
         image: Optional[np.ndarray],
         markers: Sequence[Marker],
         marker_location: str,
+        max_abs_deg: float = 12.0,
+        min_abs_deg: float = 0.05,
+        inlier_percentile: float = 85.0,
     ) -> Optional[np.ndarray]:
         if image is None or not markers or len(markers) < 2:
             return image
@@ -196,7 +226,14 @@ class GeometryManager:
         else:
             rows = [float(m.cy) for m in markers]
             xs_list = [float(m.cx) for m in markers]
-        return self.deskew_from_rows(image, rows, xs_list)
+        return self.deskew_from_rows(
+            image,
+            rows,
+            xs_list,
+            max_abs_deg=max_abs_deg,
+            min_abs_deg=min_abs_deg,
+            inlier_percentile=inlier_percentile,
+        )
 
 
 

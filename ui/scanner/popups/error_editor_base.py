@@ -601,6 +601,14 @@ class BaseErrorCorrectionDialog(QDialog):
         h, w = img_cv.shape[:2]
         if h <= 0 or w <= 0:
             return QPixmap()
+        # Large source images can spike memory during QPixmap creation; cap display size safely.
+        max_side = 3200
+        if max(h, w) > max_side:
+            scale = float(max_side) / float(max(h, w))
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            img_cv = cv2.resize(img_cv, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            h, w = img_cv.shape[:2]
         rgb_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
         rgb_img = np.ascontiguousarray(rgb_img)
         bytes_per_line = rgb_img.shape[1] * rgb_img.shape[2]

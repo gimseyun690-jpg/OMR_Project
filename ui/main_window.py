@@ -57,6 +57,12 @@ def _icon_pixmap(icon, size=40):
         icon = icon.icon()
     return icon.pixmap(size, size)
 
+
+def _to_qicon(icon):
+    if hasattr(icon, "icon"):
+        return icon.icon()
+    return icon
+
 def _load_view_class(module_path: str, class_name: str):
     try:
         module = import_module(module_path)
@@ -259,6 +265,18 @@ class HomeInterface(QWidget):
         for card in (self.card_exam, self.card_church, self.card_rebuild):
             card.setSelected(card is selected_card)
 
+    def select_exam(self):
+        self._set_selected_card(self.card_exam)
+
+    def select_church(self):
+        self._set_selected_card(self.card_church)
+
+    def select_rebuild(self):
+        self._set_selected_card(self.card_rebuild)
+
+    def clear_mode_selection(self):
+        self._set_selected_card(None)
+
     def _on_file_settings_clicked(self):
         self.open_file_settings.emit()
 
@@ -269,15 +287,15 @@ class HomeInterface(QWidget):
         self._emit_env_menu()
 
     def _on_exam_clicked(self):
-        self._set_selected_card(self.card_exam)
+        self.select_exam()
         self.open_exam_results.emit()
 
     def _on_church_clicked(self):
-        self._set_selected_card(self.card_church)
+        self.select_church()
         self.open_church_results.emit()
 
     def _on_rebuild_clicked(self):
-        self._set_selected_card(self.card_rebuild)
+        self.select_rebuild()
         self.open_rebuild_results.emit()
 
 
@@ -294,6 +312,24 @@ class ScanInterface(QWidget):
         layout.addWidget(self.scanner_view)
 
 
+class PlaceholderFeatureView(QWidget):
+    def __init__(self, title: str, detail: str = ""):
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(8)
+
+        lbl_title = QLabel(str(title or "준비중"))
+        lbl_title.setStyleSheet("font-size: 16px; font-weight: 600; color: #0F172A;")
+        lbl_msg = QLabel(str(detail or "해당 기능은 현재 준비 중입니다."))
+        lbl_msg.setWordWrap(True)
+        lbl_msg.setStyleSheet("font-size: 13px; color: #475569;")
+
+        layout.addWidget(lbl_title)
+        layout.addWidget(lbl_msg)
+        layout.addStretch(1)
+
+
 class ResultsExamInterface(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -302,20 +338,23 @@ class ResultsExamInterface(QWidget):
 
     def _init_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(16, 16, 16, 16)
-        root.setSpacing(10)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(12)
 
         title = QLabel("시험 관리")
         title.setObjectName("resultsTitle")
+        subtitle = QLabel("판독 데이터, 통계 대시보드, 명단/정답/채점/분석을 한 화면에서 관리합니다.")
+        subtitle.setObjectName("resultsSubtitle")
 
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.setMovable(False)
 
-        self.vote_view = VoteCountView()
         self.data_view = ScanDataView()
         self.stats_view = ScanStatsView()
-        self.tabs.addTab(self.vote_view, "개표 결과")
-        self.tabs.addTab(self.data_view, "판독 자료")
-        self.tabs.addTab(self.stats_view, "판독 매수")
+        self.tabs.addTab(self.data_view, _to_qicon(_icon("DOCUMENT")), "판독 자료")
+        self.tabs.addTab(self.stats_view, _to_qicon(_icon("BAR_CHART", _icon("APPLICATION"))), "판독 통계")
 
         optional_tabs = [
             ("ui.results.roster_input", "RosterInputView", "명단 입력", "roster_view"),
@@ -330,19 +369,69 @@ class ResultsExamInterface(QWidget):
         for module_path, class_name, tab_name, attr_name in optional_tabs:
             view_cls = _load_view_class(module_path, class_name)
             if view_cls is None:
+                placeholder = PlaceholderFeatureView(
+                    tab_name,
+                    f"`{module_path}.{class_name}` 모듈이 없어 탭을 축소 모드로 표시합니다.",
+                )
+                setattr(self, attr_name, placeholder)
+                self.tabs.addTab(
+                    placeholder,
+                    _to_qicon(_icon("APPLICATION")),
+                    f"{tab_name} (준비중)",
+                )
                 continue
-            view = view_cls()
+            try:
+                view = view_cls()
+            except Exception:
+                placeholder = PlaceholderFeatureView(
+                    tab_name,
+                    f"`{module_path}.{class_name}` 로드 중 오류가 발생해 축소 모드로 표시합니다.",
+                )
+                setattr(self, attr_name, placeholder)
+                self.tabs.addTab(
+                    placeholder,
+                    _to_qicon(_icon("APPLICATION")),
+                    f"{tab_name} (오류)",
+                )
+                continue
             setattr(self, attr_name, view)
-            self.tabs.addTab(view, tab_name)
+            self.tabs.addTab(view, _to_qicon(_icon("APPLICATION")), tab_name)
 
         root.addWidget(title)
+        root.addWidget(subtitle)
         root.addWidget(self.tabs, 1)
 
-        self.setStyleSheet("#resultsTitle { font-size: 22px; font-weight: 600; }")
+        self.setStyleSheet(
+            """
+            #resultsTitle { font-size: 24px; font-weight: 700; color: #0F172A; }
+            #resultsSubtitle { font-size: 12px; color: #64748B; padding-bottom: 2px; }
+            QTabWidget::pane {
+                border: 1px solid #E2E8F0;
+                border-radius: 12px;
+                background: #FFFFFF;
+                top: -2px;
+            }
+            QTabBar::tab {
+                background: transparent;
+                color: #475569;
+                min-height: 30px;
+                padding: 6px 12px;
+                margin: 6px 4px 4px 4px;
+                border-radius: 8px;
+            }
+            QTabBar::tab:hover {
+                background: #F1F5F9;
+            }
+            QTabBar::tab:selected {
+                background: #E8F1FF;
+                color: #1D4ED8;
+                font-weight: 600;
+            }
+            """
+        )
 
     def set_db_path(self, db_path):
         for attr in (
-            "vote_view",
             "data_view",
             "stats_view",
             "roster_view",
@@ -356,7 +445,10 @@ class ResultsExamInterface(QWidget):
         ):
             view = getattr(self, attr, None)
             if view is not None and hasattr(view, "set_db_path"):
-                view.set_db_path(db_path)
+                try:
+                    view.set_db_path(db_path)
+                except Exception:
+                    pass
 
 class ResultsChurchInterface(QWidget):
     def __init__(self, parent=None):
@@ -387,9 +479,11 @@ class ResultsChurchInterface(QWidget):
         self.setStyleSheet("#resultsTitle { font-size: 22px; font-weight: 600; }")
 
     def set_db_path(self, db_path):
-        self.vote_view.set_db_path(db_path)
-        self.data_view.set_db_path(db_path)
-        self.stats_view.set_db_path(db_path)
+        for view in (self.vote_view, self.data_view, self.stats_view):
+            try:
+                view.set_db_path(db_path)
+            except Exception:
+                pass
 
 
 class ResultsRebuildInterface(QWidget):
@@ -421,9 +515,11 @@ class ResultsRebuildInterface(QWidget):
         self.setStyleSheet("#resultsTitle { font-size: 22px; font-weight: 600; }")
 
     def set_db_path(self, db_path):
-        self.vote_view.set_db_path(db_path)
-        self.data_view.set_db_path(db_path)
-        self.stats_view.set_db_path(db_path)
+        for view in (self.vote_view, self.data_view, self.stats_view):
+            try:
+                view.set_db_path(db_path)
+            except Exception:
+                pass
 
 
 class SettingsInterface(QWidget):
@@ -431,7 +527,9 @@ class SettingsInterface(QWidget):
 
     auto_open_changed = Signal(bool)
     auto_retry_changed = Signal(bool)
+    high_performance_changed = Signal(bool)
     error_popup_changed = Signal(bool)
+    marker_deskew_changed = Signal(bool)
     debug_save_changed = Signal(bool)
     auto_scale_dpi_changed = Signal(bool)
     dpi_changed = Signal(int)
@@ -490,10 +588,14 @@ class SettingsInterface(QWidget):
         scan_layout = QVBoxLayout(scan_group)
         self.chk_auto_retry = QCheckBox("오류 시 자동 재시도")
         self.chk_auto_retry.toggled.connect(self._on_auto_retry_changed)
+        self.chk_high_performance = QCheckBox("고성능 모드 (배치 판독 시 CPU 코어 최대 사용)")
+        self.chk_high_performance.toggled.connect(self._on_high_performance_changed)
         self.chk_error_popup = QCheckBox("오류 팝업 표시")
         self.chk_error_popup.toggled.connect(self._on_error_popup_changed)
         self.chk_auto_scale_dpi = QCheckBox("DPI 변경 시 좌표 자동 스케일")
         self.chk_auto_scale_dpi.toggled.connect(self._on_auto_scale_dpi_changed)
+        self.chk_marker_deskew = QCheckBox("마커 기반 데스큐 사용")
+        self.chk_marker_deskew.toggled.connect(self._on_marker_deskew_changed)
         offset_row = QHBoxLayout()
         offset_row.addWidget(QLabel("전역 X 오프셋"))
         self.spin_offset_x = QSpinBox()
@@ -553,8 +655,10 @@ class SettingsInterface(QWidget):
         dpi_row.addWidget(self.spin_dpi)
         dpi_row.addStretch(1)
         scan_layout.addWidget(self.chk_auto_retry)
+        scan_layout.addWidget(self.chk_high_performance)
         scan_layout.addWidget(self.chk_error_popup)
         scan_layout.addWidget(self.chk_auto_scale_dpi)
+        scan_layout.addWidget(self.chk_marker_deskew)
         scan_layout.addLayout(offset_row)
         scan_layout.addWidget(partial_group)
         scan_layout.addLayout(dpi_row)
@@ -608,8 +712,10 @@ class SettingsInterface(QWidget):
         self.lbl_font.setText(f"기본: {font_size}")
 
         self.chk_auto_retry.setChecked(self._settings.value("scan/auto_retry", False, type=bool))
+        self.chk_high_performance.setChecked(self._settings.value("scan/high_performance", False, type=bool))
         self.chk_error_popup.setChecked(self._settings.value("scan/error_popups", True, type=bool))
         self.chk_auto_scale_dpi.setChecked(self._settings.value("scan/auto_scale_dpi", True, type=bool))
+        self.chk_marker_deskew.setChecked(self._settings.value("scan/marker_deskew", True, type=bool))
         self.spin_dpi.setValue(self._settings.value("scan/dpi", 150, type=int))
         self.spin_offset_x.setValue(self._settings.value("scan/global_offset_x", 0, type=int))
         self.spin_offset_y.setValue(self._settings.value("scan/global_offset_y", 0, type=int))
@@ -661,6 +767,10 @@ class SettingsInterface(QWidget):
         self._settings.setValue("scan/auto_retry", checked)
         self.auto_retry_changed.emit(checked)
 
+    def _on_high_performance_changed(self, checked: bool):
+        self._settings.setValue("scan/high_performance", checked)
+        self.high_performance_changed.emit(checked)
+
     def _on_error_popup_changed(self, checked: bool):
         self._settings.setValue("scan/error_popups", checked)
         self.error_popup_changed.emit(checked)
@@ -668,6 +778,10 @@ class SettingsInterface(QWidget):
     def _on_auto_scale_dpi_changed(self, checked: bool):
         self._settings.setValue("scan/auto_scale_dpi", checked)
         self.auto_scale_dpi_changed.emit(checked)
+
+    def _on_marker_deskew_changed(self, checked: bool):
+        self._settings.setValue("scan/marker_deskew", checked)
+        self.marker_deskew_changed.emit(checked)
 
     def _on_dpi_changed(self, value: int):
         self._settings.setValue("scan/dpi", int(value))
@@ -827,6 +941,17 @@ class OMRScannerApp(QMainWindow):
             pass
 
     def switchTo(self, interface: QWidget):
+        if interface in (
+            getattr(self, "results_exam_interface", None),
+            getattr(self, "results_church_interface", None),
+            getattr(self, "results_rebuild_interface", None),
+        ):
+            if self.current_db_path and hasattr(interface, "set_db_path"):
+                try:
+                    interface.set_db_path(self.current_db_path)
+                except Exception:
+                    pass
+
         self.stackedWidget.setCurrentWidget(interface)
         try:
             self.navigationInterface.setCurrentItem(interface.objectName())
@@ -852,16 +977,19 @@ class OMRScannerApp(QMainWindow):
             self.results_exam_interface,
             _icon("DOCUMENT"),
             "시험 관리",
+            on_click=self._on_exam_nav_clicked,
         )
         self.addSubInterface(
             self.results_church_interface,
             _icon("PEOPLE"),
             "교회 선거",
+            on_click=self._on_church_nav_clicked,
         )
         self.addSubInterface(
             self.results_rebuild_interface,
             _icon("CITY"),
             "재개발 총회",
+            on_click=self._on_rebuild_nav_clicked,
         )
         self.addSubInterface(
             self.settings_interface,
@@ -895,9 +1023,11 @@ class OMRScannerApp(QMainWindow):
         self.home_interface.open_rebuild_results.connect(self._on_home_select_rebuild)
         self.scan_interface.scanner_view.closed_signal.connect(self._return_home_from_scan)
         self.settings_interface.auto_retry_changed.connect(self._apply_auto_retry)
+        self.settings_interface.high_performance_changed.connect(self._apply_high_performance_mode)
         self.settings_interface.error_popup_changed.connect(self._apply_error_popups)
         self.settings_interface.debug_save_changed.connect(self._apply_debug_save)
         self.settings_interface.auto_scale_dpi_changed.connect(self._apply_auto_scale_dpi)
+        self.settings_interface.marker_deskew_changed.connect(self._apply_marker_deskew)
         self.settings_interface.dpi_changed.connect(self._apply_scan_dpi)
         self.settings_interface.global_offset_x_changed.connect(self._apply_global_offset_x)
         self.settings_interface.global_offset_y_changed.connect(self._apply_global_offset_y)
@@ -992,32 +1122,100 @@ class OMRScannerApp(QMainWindow):
             self._set_nav_item_enabled(route_key, True)
 
     def _on_home_nav_clicked(self):
+        self._unlock_navigation()
+        if hasattr(self, "home_interface") and hasattr(self.home_interface, "clear_mode_selection"):
+            self.home_interface.clear_mode_selection()
         self.switchTo(self.home_interface)
 
     def _return_home_from_scan(self):
         self._unlock_navigation()
         self.switchTo(self.home_interface)
 
-    def _on_home_select_exam(self):
+    def _ensure_db_selected(self, context_label: str = "해당 기능") -> bool:
+        if self.current_db_path and os.path.exists(self.current_db_path):
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            "DB 선택 필요",
+            f"{context_label}을(를) 사용하려면 먼저 DB 파일을 선택해야 합니다.\n지금 파일 설정을 여시겠습니까?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            self.open_file_setting()
+        return bool(self.current_db_path and os.path.exists(self.current_db_path))
+
+    def _activate_exam_mode(self):
+        if not self._ensure_db_selected("시험 관리"):
+            return False
         self._lock_navigation({"홈", "스캔 판독", "시험 관리"})
         self.scan_interface.scanner_view.pipeline.set_candidate_enabled(True)
         self.scan_interface.scanner_view.error_editor_profile = "score"
+        if hasattr(self, "home_interface") and hasattr(self.home_interface, "select_exam"):
+            self.home_interface.select_exam()
+        return True
 
-    def _on_home_select_church(self):
+    def _activate_church_mode(self):
+        if not self._ensure_db_selected("교회 선거"):
+            return False
         self._lock_navigation({"홈", "스캔 판독", "교회 선거"})
         self.scan_interface.scanner_view.pipeline.set_candidate_enabled(False)
         self.scan_interface.scanner_view.error_editor_profile = "church"
+        if hasattr(self, "home_interface") and hasattr(self.home_interface, "select_church"):
+            self.home_interface.select_church()
+        return True
 
-    def _on_home_select_rebuild(self):
+    def _activate_rebuild_mode(self):
+        if not self._ensure_db_selected("재개발 총회"):
+            return False
         self._lock_navigation({"홈", "스캔 판독", "재개발 총회"})
         self.scan_interface.scanner_view.pipeline.set_candidate_enabled(False)
         self.scan_interface.scanner_view.error_editor_profile = "rebuild"
+        if hasattr(self, "home_interface") and hasattr(self.home_interface, "select_rebuild"):
+            self.home_interface.select_rebuild()
+        return True
+
+    def _on_home_select_exam(self):
+        if not self._activate_exam_mode():
+            if hasattr(self, "home_interface") and hasattr(self.home_interface, "clear_mode_selection"):
+                self.home_interface.clear_mode_selection()
+            return
+
+    def _on_home_select_church(self):
+        if not self._activate_church_mode():
+            if hasattr(self, "home_interface") and hasattr(self.home_interface, "clear_mode_selection"):
+                self.home_interface.clear_mode_selection()
+            return
+
+    def _on_home_select_rebuild(self):
+        if not self._activate_rebuild_mode():
+            if hasattr(self, "home_interface") and hasattr(self.home_interface, "clear_mode_selection"):
+                self.home_interface.clear_mode_selection()
+            return
+
+    def _on_exam_nav_clicked(self):
+        if not self._activate_exam_mode():
+            return
+        self.switchTo(self.results_exam_interface)
+
+    def _on_church_nav_clicked(self):
+        if not self._activate_church_mode():
+            return
+        self.switchTo(self.results_church_interface)
+
+    def _on_rebuild_nav_clicked(self):
+        if not self._activate_rebuild_mode():
+            return
+        self.switchTo(self.results_rebuild_interface)
 
     def _apply_saved_settings(self):
         self._apply_auto_retry(self._settings.value("scan/auto_retry", False, type=bool))
+        self._apply_high_performance_mode(self._settings.value("scan/high_performance", False, type=bool))
         self._apply_error_popups(self._settings.value("scan/error_popups", True, type=bool))
         self._apply_debug_save(self._settings.value("debug/save_on_error", False, type=bool))
         self._apply_auto_scale_dpi(self._settings.value("scan/auto_scale_dpi", True, type=bool))
+        self._apply_marker_deskew(self._settings.value("scan/marker_deskew", True, type=bool))
         self._apply_scan_dpi(self._settings.value("scan/dpi", 150, type=int))
         self._apply_global_offset_x(self._settings.value("scan/global_offset_x", 0, type=int))
         self._apply_global_offset_y(self._settings.value("scan/global_offset_y", 0, type=int))
@@ -1031,6 +1229,13 @@ class OMRScannerApp(QMainWindow):
         view = self.scan_interface.scanner_view
         if hasattr(view, "control_panel") and hasattr(view.control_panel, "chk_auto_retry"):
             view.control_panel.chk_auto_retry.setChecked(enabled)
+
+    def _apply_high_performance_mode(self, enabled: bool):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "set_demo_high_performance_mode"):
+            view.set_demo_high_performance_mode(bool(enabled))
+        else:
+            view.demo_high_performance_mode = bool(enabled)
 
     def _apply_error_popups(self, enabled: bool):
         view = self.scan_interface.scanner_view
@@ -1046,6 +1251,11 @@ class OMRScannerApp(QMainWindow):
         view = self.scan_interface.scanner_view
         if hasattr(view, "pipeline"):
             view.pipeline.set_auto_scale_dpi(enabled)
+
+    def _apply_marker_deskew(self, enabled: bool):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.set_marker_deskew_enabled(bool(enabled))
 
     def _apply_scan_dpi(self, value: int):
         view = self.scan_interface.scanner_view

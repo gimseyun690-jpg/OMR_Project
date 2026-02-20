@@ -45,6 +45,18 @@ class ImageViewer(QWidget):
         except Exception:
             self.clear()
 
+    def set_preview_jpeg_bytes(self, jpeg_bytes):
+        if not jpeg_bytes:
+            return
+        try:
+            qimg = QImage.fromData(jpeg_bytes, "JPG")
+            if qimg.isNull():
+                return
+            self._pixmap = QPixmap.fromImage(qimg)
+            self._refresh()
+        except Exception:
+            pass
+
     def set_image_cv(self, image_cv):
         if image_cv is None:
             self.clear()
@@ -56,7 +68,8 @@ class ImageViewer(QWidget):
         rgb = cv2.cvtColor(image_cv, cv2.COLOR_BGR2RGB)
         h, w = rgb.shape[:2]
         bytes_per_line = w * 3
-        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        # Copy to detach from numpy buffer lifetime and avoid intermittent Qt crashes.
+        qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(qimg)
         self._pixmap = pixmap
         self._refresh()

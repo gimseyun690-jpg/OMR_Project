@@ -15,6 +15,7 @@ class VoteCountView(QWidget):
         self.db = DBManager()
         self.current_db_path = None
         self._updating_table = False
+        self._last_scan_count = -1
         self.init_ui()
 
     def init_ui(self):
@@ -95,7 +96,7 @@ class VoteCountView(QWidget):
         self.btn_refresh = QPushButton("\uacb0\uacfc \uc0c8\ub85c\uace0\uce68")
         self.btn_refresh.setMinimumHeight(40)
         self.btn_refresh.setStyleSheet("background-color: #E8F5E9; font-weight: bold;")
-        self.btn_refresh.clicked.connect(self.load_data)
+        self.btn_refresh.clicked.connect(lambda: self.load_data(force=True))
 
         self.btn_export = QPushButton("\uc5d1\uc140 \ub0b4\ubcf4\ub0b4\uae30")
         self.btn_export.setMinimumHeight(40)
@@ -109,7 +110,20 @@ class VoteCountView(QWidget):
         self.setLayout(layout)
 
     def set_db_path(self, path):
+        path = path or None
+        changed = path != self.current_db_path
         self.current_db_path = path
+        if not self.current_db_path:
+            self.table.setRowCount(0)
+            self._last_scan_count = -1
+            return
+
+        if not changed:
+            try:
+                if self.db.get_scan_count(self.current_db_path) == self._last_scan_count:
+                    return
+            except Exception:
+                pass
 
         title = self.db.get_setting(self.current_db_path, "vote_count_title", "")
         q_count = self.db.get_setting(self.current_db_path, "vote_count_q_count", "5")
@@ -150,11 +164,18 @@ class VoteCountView(QWidget):
         self.on_target_title_changed(self.target_title_edit.text())
         self.on_target_opt1_changed(self.target_opt1_edit.text())
         self.on_target_opt2_changed(self.target_opt2_edit.text())
-        self.load_data()
+        self.load_data(force=True)
 
-    def load_data(self):
+    def load_data(self, force=False):
         if not self.current_db_path:
             return
+
+        if not force:
+            try:
+                if self.db.get_scan_count(self.current_db_path) == self._last_scan_count:
+                    return
+            except Exception:
+                pass
 
         q_count = self.count_spin.value()
         stats = self.db.get_vote_counts(self.current_db_path, q_count=q_count)
@@ -170,11 +191,15 @@ class VoteCountView(QWidget):
             others = counts["0"] + counts["3"]
             self.table.setItem(row, 3, self._item(str(others)))
         self._updating_table = False
+        try:
+            self._last_scan_count = self.db.get_scan_count(self.current_db_path)
+        except Exception:
+            pass
 
     def on_q_count_changed(self, value):
         if self.current_db_path:
             self.db.save_setting(self.current_db_path, "vote_count_q_count", value)
-        self.load_data()
+        self.load_data(force=True)
 
     def on_title_changed(self, text):
         self.lbl_title.setText(text.strip())

@@ -5,8 +5,10 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterable
 
+import cv2
+import numpy as np
 from PySide2.QtCore import QObject, QRunnable, QThread, Signal
 
 
@@ -15,13 +17,28 @@ class ScanWorker(QThread):
     scan_finished = Signal()
     error_occurred = Signal(str)
 
-    def __init__(self, hwnd, save_folder, dpi=150):
+    def __init__(
+        self,
+        hwnd,
+        save_folder,
+        dpi=150,
+        scanner_backend: str | None = None,
+        scanner_source_hint: str | None = None,
+        scanner_backend_order: Iterable[str] | str | None = None,
+    ):
         super().__init__()
         from logic.scanner_core import ScannerDevice
 
         self.hwnd = hwnd
         self.save_folder = save_folder
-        self.scanner = ScannerDevice()
+        backend_order = scanner_backend_order
+        if isinstance(backend_order, str):
+            backend_order = [v.strip() for v in backend_order.split(",") if v.strip()]
+        self.scanner = ScannerDevice(
+            backend=scanner_backend,
+            source_name_hint=scanner_source_hint,
+            backend_order=backend_order,
+        )
         self.scanner.set_dpi(dpi)
         self.is_running = True
 
@@ -60,6 +77,7 @@ class DemoWorker(QThread):
     progress = Signal(int, int, str)
     result_row = Signal(list)
     result_rows = Signal(list)
+    preview_ready = Signal(str, object)
     finished = Signal(int, int)
     error = Signal(str)
 
@@ -73,6 +91,9 @@ class DemoWorker(QThread):
         ui_update_interval_sec: float = 0.05,
         result_emit_interval_sec: float = 0.05,
         result_ui_batch_size: int = 20,
+        preview_emit_interval_sec: float = 0.20,
+        preview_max_edge: int = 640,
+        preview_jpeg_quality: int = 80,
         db_batch_size: int = 100,
         submit_window_factor: int = 4,
         max_workers: int | None = None,
@@ -87,6 +108,9 @@ class DemoWorker(QThread):
         self.ui_update_interval_sec = max(0.01, float(ui_update_interval_sec))
         self.result_emit_interval_sec = max(0.01, float(result_emit_interval_sec))
         self.result_ui_batch_size = max(1, int(result_ui_batch_size))
+        self.preview_emit_interval_sec = max(0.05, float(preview_emit_interval_sec))
+        self.preview_max_edge = max(240, int(preview_max_edge))
+        self.preview_jpeg_quality = min(95, max(40, int(preview_jpeg_quality)))
         self.db_batch_size = max(1, int(db_batch_size))
         self.submit_window_factor = max(1, int(submit_window_factor))
         cpu_total = max(1, (os.cpu_count() or 1))
@@ -96,7 +120,12 @@ class DemoWorker(QThread):
         self._last_progress_value = -1
         self._last_progress_emit_ts = 0.0
         self._last_result_emit_ts = 0.0
+        self._last_preview_emit_ts = 0.0
         self._pending_result_rows = []
+        self._ordered_result_by_idx = {}
+        self._next_result_emit_idx = 1
+        self._last_ordered_preview_path = ""
+        self._preview_pipeline = None
         self._thread_local = threading.local()
         self._pipeline_snapshot = self._capture_pipeline_snapshot(getattr(self.controller, "pipeline", None))
 
@@ -152,6 +181,7 @@ class DemoWorker(QThread):
             "debug_dir": getattr(pipeline, "debug_dir", None),
             "candidate_enabled": bool(getattr(pipeline, "candidate_enabled", False)),
             "auto_scale_dpi": bool(getattr(pipeline, "auto_scale_dpi", True)),
+            "marker_deskew_enabled": bool(getattr(pipeline, "marker_deskew_enabled", True)),
             "warp_enabled": bool(getattr(pipeline, "warp_enabled", True)),
             "dpi": dpi,
             "engine_config": engine_config,
@@ -174,6 +204,7 @@ class DemoWorker(QThread):
         pipe.set_candidate_enabled(bool(snap.get("candidate_enabled", False)))
         pipe.set_dpi(int(snap.get("dpi", 150)))
         pipe.set_auto_scale_dpi(bool(snap.get("auto_scale_dpi", True)))
+        pipe.set_marker_deskew_enabled(bool(snap.get("marker_deskew_enabled", True)))
         pipe.warp_enabled = bool(snap.get("warp_enabled", True))
 
         form_path = snap.get("form_path")
@@ -192,6 +223,11 @@ class DemoWorker(QThread):
             pipe = self._build_worker_pipeline()
             self._thread_local.pipeline = pipe
         return pipe
+
+    def _get_preview_pipeline(self):
+        if self._preview_pipeline is None:
+            self._preview_pipeline = self._build_worker_pipeline()
+        return self._preview_pipeline
 
     def _analyze_one(self, idx: int, image_path: str, read_num: int) -> dict[str, Any]:
         try:
@@ -327,6 +363,77 @@ class DemoWorker(QThread):
         self._last_result_emit_ts = now
         self.result_rows.emit(rows)
 
+    def _push_ordered_result(self, idx: int, row_data):
+        self._ordered_result_by_idx[int(idx)] = row_data
+        emitted_any = False
+        last_path = ""
+
+        while self._next_result_emit_idx in self._ordered_result_by_idx:
+            ordered_row = self._ordered_result_by_idx.pop(self._next_result_emit_idx)
+            self._next_result_emit_idx += 1
+            if ordered_row is None:
+                continue
+            self._pending_result_rows.append(ordered_row)
+            emitted_any = True
+            try:
+                if len(ordered_row) > 7 and ordered_row[7]:
+                    last_path = str(ordered_row[7])
+            except Exception:
+                pass
+
+        if emitted_any:
+            self._emit_result_rows(force=False)
+            if last_path:
+                self._last_ordered_preview_path = last_path
+                self._emit_preview(last_path, force=False)
+
+    def _build_preview_jpeg(self, image_path: str):
+        if not image_path or not os.path.exists(image_path):
+            return None
+        try:
+            img_array = np.fromfile(image_path, np.uint8)
+            image = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            if image is None:
+                return None
+
+            pipe = self._get_preview_pipeline()
+            try:
+                aligned, ok, _ = pipe.engine.align_image_warp(image)
+                if ok and aligned is not None:
+                    image = aligned
+            except Exception:
+                pass
+
+            h, w = image.shape[:2]
+            if h > 0 and w > 0:
+                max_side = max(h, w)
+                if max_side > self.preview_max_edge:
+                    scale = float(self.preview_max_edge) / float(max_side)
+                    new_w = max(1, int(w * scale))
+                    new_h = max(1, int(h * scale))
+                    image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+            ok, encoded = cv2.imencode(
+                ".jpg",
+                image,
+                [int(cv2.IMWRITE_JPEG_QUALITY), int(self.preview_jpeg_quality)],
+            )
+            if not ok:
+                return None
+            return encoded.tobytes()
+        except Exception:
+            return None
+
+    def _emit_preview(self, image_path: str, force: bool = False):
+        now = time.monotonic()
+        if not force and (now - self._last_preview_emit_ts) < self.preview_emit_interval_sec:
+            return
+        jpeg = self._build_preview_jpeg(image_path)
+        if not jpeg:
+            return
+        self._last_preview_emit_ts = now
+        self.preview_ready.emit(image_path, jpeg)
+
     def run(self):
         ok = 0
         fail = 0
@@ -362,6 +469,7 @@ class DemoWorker(QThread):
                         last_filename = os.path.basename(path)
 
                         if future.cancelled():
+                            self._push_ordered_result(idx, None)
                             continue
 
                         try:
@@ -378,9 +486,7 @@ class DemoWorker(QThread):
 
                         if result.get("ok"):
                             row_data = result.get("row_data")
-                            if row_data:
-                                self._pending_result_rows.append(row_data)
-                                self._emit_result_rows(force=False)
+                            self._push_ordered_result(idx, row_data if row_data is not None else None)
 
                             save_data = result.get("save_data")
                             if db_conn is not None and save_data:
@@ -397,6 +503,7 @@ class DemoWorker(QThread):
                                 self.first_error = err
                             if len(self.error_samples) < 5:
                                 self.error_samples.append(f"{os.path.basename(path)}: {err}")
+                            self._push_ordered_result(idx, None)
 
                         progress_name = os.path.basename(result.get("path", path))
                         self._emit_progress(processed, total, progress_name)
@@ -415,6 +522,8 @@ class DemoWorker(QThread):
             if db_conn is not None and db_batch_rows:
                 self._flush_batch(db_conn, db_batch_rows)
 
+            if self._last_ordered_preview_path:
+                self._emit_preview(self._last_ordered_preview_path, force=True)
             self._emit_result_rows(force=True)
             self._emit_progress(processed, total, last_filename, force=True)
             self.finished.emit(ok, fail)
