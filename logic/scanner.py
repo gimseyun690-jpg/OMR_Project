@@ -1,7 +1,7 @@
 ﻿from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypedDict
 
 import cv2
 import numpy as np
@@ -11,6 +11,43 @@ from logic.marker_detector import MarkerDetector
 from logic.omr_types import Marker, QuestionResult
 
 logger = logging.getLogger(__name__)
+
+
+class ScanGeometryData(TypedDict):
+    global_scale_x: float
+    global_scale_y: float
+    expected_w_scaled: float
+    expected_h_scaled: float
+    axis_key: str
+    marker_axis: List[Marker]
+
+
+class ScanContext(TypedDict):
+    work_img: Optional[np.ndarray]
+    processed_img: Optional[np.ndarray]
+    debug_img: Optional[np.ndarray]
+    markers: List[Marker]
+    marker_axis: List[Marker]
+    axis_key: str
+    marker_location: str
+    geometry_data: ScanGeometryData
+    deskew_applied: bool
+    error_status: str
+
+
+class MarkerColumnCommonParams(TypedDict):
+    scale_x: float
+    scale_y: float
+    x_offset: float
+    y_offset: float
+    box_w: int
+    box_h: int
+    off_x: int
+    off_y: int
+    anchor_y_mode: str
+    expected_h_scaled: float
+    expected_anchor_y_scaled: float
+    use_page_end_y_correction: bool
 
 class ImageProcessor:
     def __init__(
@@ -637,7 +674,7 @@ class OMRScanner:
         marker_location: str,
         scale: float,
         layout_config: Optional[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+    ) -> ScanGeometryData:
         loc = str(marker_location or "left").strip().lower()
         if loc not in ("left", "right", "top", "bottom"):
             loc = "left"
@@ -677,8 +714,21 @@ class OMRScanner:
         marker_location: str,
         layout_config: Optional[Dict[str, Any]],
         scale: float,
-    ) -> Dict[str, Any]:
-        context: Dict[str, Any] = {
+    ) -> ScanContext:
+        base_scale_value = float(scale)
+        if (not np.isfinite(base_scale_value)) or base_scale_value <= 0.0:
+            base_scale_value = 1.0
+
+        default_geometry: ScanGeometryData = {
+            "global_scale_x": float(base_scale_value),
+            "global_scale_y": float(base_scale_value),
+            "expected_w_scaled": 0.0,
+            "expected_h_scaled": 0.0,
+            "axis_key": "cy",
+            "marker_axis": [],
+        }
+
+        context: ScanContext = {
             "work_img": None,
             "processed_img": None,
             "debug_img": None,
@@ -686,14 +736,7 @@ class OMRScanner:
             "marker_axis": [],
             "axis_key": "cy",
             "marker_location": str(marker_location or "").strip().lower(),
-            "geometry_data": {
-                "global_scale_x": float(scale if np.isfinite(float(scale)) and float(scale) > 0.0 else 1.0),
-                "global_scale_y": float(scale if np.isfinite(float(scale)) and float(scale) > 0.0 else 1.0),
-                "expected_w_scaled": 0.0,
-                "expected_h_scaled": 0.0,
-                "axis_key": "cy",
-                "marker_axis": [],
-            },
+            "geometry_data": default_geometry,
             "deskew_applied": False,
             "error_status": "",
         }
@@ -925,6 +968,333 @@ class OMRScanner:
                 return float(marker.cy)
         return float(marker.cy)
 
+    def _prepare_marker_question_items(
+        self,
+        questions: Sequence[Dict[str, Any]],
+        layout: Dict[str, Any],
+        is_horizontal_target: bool,
+        numbering_order: str,
+        layout_columns: int,
+        rows_per_col: int,
+    ) -> List[Dict[str, int]]:
+        prepared: List[Dict[str, int]] = []
+        for i, q in enumerate(questions):
+            if not isinstance(q, dict):
+                continue
+            q_num = int(q.get("no", i + 1))
+            choices_count = max(1, int(q.get("choices", 5)))
+
+            if is_horizontal_target:
+                col_index = q.get("col_index")
+                row_in_col = q.get("row_in_col")
+                if col_index is None or row_in_col is None:
+                    idx = int(q_num) - 1
+                    if numbering_order == "row_major":
+                        cols = int(layout_columns) if int(layout_columns) > 0 else 1
+                        cols = max(1, cols)
+                        col_index = idx % cols
+                        row_in_col = idx // cols
+                    else:
+                        col_index = idx // rows_per_col
+                        row_in_col = idx % rows_per_col
+                prepared.append(
+                    {
+                        "q_num": q_num,
+                        "choices": choices_count,
+                        "col_index": int(col_index),
+                        "row_in_col": int(row_in_col),
+                    }
+                )
+            else:
+                row_index = q.get("row_index")
+                if row_index is None:
+                    row_index = i
+                prepared.append(
+                    {
+                        "q_num": q_num,
+                        "choices": choices_count,
+                        "row_index": int(row_index),
+                    }
+                )
+        return prepared
+
+    def _build_marker_question_anchor_maps(
+        self,
+        prepared: Sequence[Dict[str, int]],
+        layout: Dict[str, Any],
+        is_horizontal_target: bool,
+        marker_start_index: int,
+        marks_by_x: Sequence[Marker],
+        marks_by_y: Sequence[Marker],
+    ) -> Tuple[Dict[int, Marker], Dict[int, Marker], str]:
+        col_anchor_map: Dict[int, Marker] = {}
+        row_anchor_map: Dict[int, Marker] = {}
+
+        if is_horizontal_target:
+            needed_cols = sorted({int(item["col_index"]) for item in prepared})
+            if not needed_cols or needed_cols[0] < 0:
+                return {}, {}, "TIMING_MARK"
+
+            fixed_anchor_mode = self._to_bool(layout.get("fixed_anchor_mode", False), False)
+            raw_anchor_indices = layout.get("column_anchor_indices", [])
+            anchor_index_base = int(layout.get("column_anchor_index_base", 1))
+            use_fixed = fixed_anchor_mode and isinstance(raw_anchor_indices, list) and len(raw_anchor_indices) > 0
+            base_marks_for_fixed = (
+                list(marks_by_x[(marker_start_index - 1) :]) if (marker_start_index - 1) < len(marks_by_x) else []
+            )
+
+            for col in needed_cols:
+                if use_fixed:
+                    if col >= len(raw_anchor_indices):
+                        return {}, {}, "TIMING_MARK"
+                    try:
+                        idx0 = int(raw_anchor_indices[col]) - anchor_index_base
+                    except Exception:
+                        return {}, {}, "TIMING_MARK"
+                    if not (0 <= idx0 < len(base_marks_for_fixed)):
+                        return {}, {}, "TIMING_MARK"
+                    col_anchor_map[col] = base_marks_for_fixed[idx0]
+                else:
+                    idx0 = (marker_start_index - 1) + col
+                    if not (0 <= idx0 < len(marks_by_x)):
+                        return {}, {}, "TIMING_MARK"
+                    col_anchor_map[col] = marks_by_x[idx0]
+
+            if use_fixed:
+                fixed_anchor_y_mode = str(layout.get("fixed_anchor_y_mode", "")).strip().lower()
+                if fixed_anchor_y_mode == "median" and col_anchor_map:
+                    med_y = int(
+                        round(
+                            float(
+                                np.median(
+                                    np.asarray([int(col_anchor_map[c].cy) for c in needed_cols], dtype=np.float32)
+                                )
+                            )
+                        )
+                    )
+                    for col in needed_cols:
+                        m = col_anchor_map[col]
+                        col_anchor_map[col] = Marker(
+                            cx=int(m.cx),
+                            cy=int(med_y),
+                            interpolated=bool(getattr(m, "interpolated", False)),
+                        )
+        else:
+            needed_rows = sorted({int(item["row_index"]) for item in prepared})
+            if not needed_rows or needed_rows[0] < 0:
+                return {}, {}, "TIMING_MARK"
+
+            for row_idx in needed_rows:
+                idx0 = (marker_start_index - 1) + row_idx
+                if not (0 <= idx0 < len(marks_by_y)):
+                    return {}, {}, "TIMING_MARK"
+                row_anchor_map[row_idx] = marks_by_y[idx0]
+
+        return col_anchor_map, row_anchor_map, ""
+
+    def _resolve_marker_question_decode_params(
+        self,
+        layout: Dict[str, Any],
+        geometry_data: ScanGeometryData,
+        scale: float,
+        is_horizontal_target: bool,
+    ) -> Dict[str, Any]:
+        geom_scale_x = float(geometry_data.get("global_scale_x", scale))
+        geom_scale_y = float(geometry_data.get("global_scale_y", scale))
+
+        x_offset = self._scaled_config_offset("question", float(layout.get("x_offset", 600)), geom_scale_x)
+        raw_choice_dx = float(layout.get("choice_dx", 70))
+        effective_choice_dx = float(raw_choice_dx) * float(geom_scale_x)
+        box_w = max(1, int(round(float(layout.get("box_w", 40)) * geom_scale_x)))
+        box_h = max(1, int(round(float(layout.get("box_h", 40)) * geom_scale_y)))
+        row_offset_y = self._scaled_config_offset("question", float(layout.get("row_offset_y", 0)), geom_scale_y)
+        row_start_y = self._scaled_config_offset("question", float(layout.get("row_start_y", 360)), geom_scale_y)
+        raw_row_dy = float(layout.get("row_dy", 70))
+        effective_row_dy = float(raw_row_dy) * float(geom_scale_y)
+        question_off_x, question_off_y = self._combined_offset("question")
+        expected_h_scaled = float(geometry_data.get("expected_h_scaled", 0.0))
+        try:
+            expected_anchor_y = float(
+                layout.get(
+                    "expected_anchor_y",
+                    layout.get("top_marker_y", layout.get("anchor_top_y", 0.0)),
+                )
+            )
+        except Exception:
+            expected_anchor_y = 0.0
+        expected_anchor_y_scaled = float(expected_anchor_y) * float(geom_scale_y)
+        use_page_end_y_correction = self._to_bool(
+            layout.get("page_end_y_correction", is_horizontal_target),
+            is_horizontal_target,
+        )
+        try:
+            mark_threshold = float(layout.get("mark_threshold", self.pixel_threshold))
+        except Exception:
+            mark_threshold = float(self.pixel_threshold)
+        if (not np.isfinite(mark_threshold)) or mark_threshold <= 0.0:
+            mark_threshold = float(self.pixel_threshold)
+
+        try:
+            score_inner_ratio = float(layout.get("score_inner_ratio", 0.18))
+        except Exception:
+            score_inner_ratio = 0.18
+        score_inner_ratio = float(np.clip(score_inner_ratio, 0.0, 0.45))
+
+        return {
+            "x_offset": float(x_offset),
+            "effective_choice_dx": float(effective_choice_dx),
+            "box_w": int(box_w),
+            "box_h": int(box_h),
+            "row_offset_y": float(row_offset_y),
+            "row_start_y": float(row_start_y),
+            "effective_row_dy": float(effective_row_dy),
+            "question_off_x": int(question_off_x),
+            "question_off_y": int(question_off_y),
+            "expected_h_scaled": float(expected_h_scaled),
+            "expected_anchor_y_scaled": float(expected_anchor_y_scaled),
+            "use_page_end_y_correction": bool(use_page_end_y_correction),
+            "mark_threshold": float(mark_threshold),
+            "score_inner_ratio": float(score_inner_ratio),
+        }
+
+    def _build_marker_question_rois(
+        self,
+        item: Dict[str, int],
+        is_horizontal_target: bool,
+        row_start_from_marker: bool,
+        col_anchor_map: Dict[int, Marker],
+        row_anchor_map: Dict[int, Marker],
+        decode_params: Dict[str, Any],
+        work_img: Optional[np.ndarray],
+    ) -> Tuple[Optional[List[Tuple[int, int, int, int]]], str]:
+        choices_count = int(item["choices"])
+
+        box_w = int(decode_params["box_w"])
+        box_h = int(decode_params["box_h"])
+        row_start_y = float(decode_params["row_start_y"])
+        row_offset_y = float(decode_params["row_offset_y"])
+        effective_row_dy = float(decode_params["effective_row_dy"])
+        x_offset = float(decode_params["x_offset"])
+        effective_choice_dx = float(decode_params["effective_choice_dx"])
+        question_off_x = float(decode_params["question_off_x"])
+        question_off_y = float(decode_params["question_off_y"])
+        expected_h_scaled = float(decode_params["expected_h_scaled"])
+        expected_anchor_y_scaled = float(decode_params["expected_anchor_y_scaled"])
+        use_page_end_y_correction = bool(decode_params["use_page_end_y_correction"])
+
+        if is_horizontal_target:
+            col_index = int(item["col_index"])
+            if col_index not in col_anchor_map:
+                return None, "TIMING_MARK"
+            base_mark = col_anchor_map[col_index]
+            base_cx = float(base_mark.cx)
+            row_in_col = int(item.get("row_in_col", 0))
+            anchor_y = float(base_mark.cy) if row_start_from_marker else 0.0
+            relative_y = (float(row_start_y) + float(row_offset_y)) + (
+                float(row_in_col) * float(effective_row_dy)
+            )
+            if use_page_end_y_correction and expected_h_scaled > 1e-6 and work_img is not None:
+                page_gain = self._vertical_page_gain(
+                    anchor_y=anchor_y,
+                    img_h=int(work_img.shape[0]),
+                    expected_h_scaled=float(expected_h_scaled),
+                    expected_anchor_scaled=float(expected_anchor_y_scaled if row_start_from_marker else 0.0),
+                )
+                target_cy = int(round(anchor_y + (float(relative_y) * float(page_gain)) + float(question_off_y)))
+            else:
+                target_cy = self._indexed_axis_coord(
+                    anchor=float(anchor_y),
+                    axis_offset=(float(row_start_y) + float(row_offset_y)),
+                    axis_step=float(effective_row_dy),
+                    axis_index=row_in_col,
+                    section_offset=float(question_off_y),
+                )
+            start_y = int(round(target_cy - (box_h / 2.0)))
+        else:
+            row_index = int(item["row_index"])
+            if row_index not in row_anchor_map:
+                return None, "TIMING_MARK"
+            base_mark = row_anchor_map[row_index]
+            base_cx = float(base_mark.cx)
+            if row_start_from_marker:
+                target_cy = self._indexed_axis_coord(
+                    anchor=float(base_mark.cy),
+                    axis_offset=(float(row_start_y) + float(row_offset_y)),
+                    axis_step=0.0,
+                    axis_index=0,
+                    section_offset=float(question_off_y),
+                )
+            else:
+                target_cy = self._indexed_axis_coord(
+                    anchor=0.0,
+                    axis_offset=(float(row_start_y) + float(row_offset_y)),
+                    axis_step=float(effective_row_dy),
+                    axis_index=row_index,
+                    section_offset=float(question_off_y),
+                )
+            start_y = int(round(target_cy - (box_h / 2.0)))
+
+        rois: List[Tuple[int, int, int, int]] = []
+        for c_idx in range(choices_count):
+            rx = self._indexed_axis_coord(
+                anchor=float(base_cx),
+                axis_offset=float(x_offset),
+                axis_step=float(effective_choice_dx),
+                axis_index=c_idx,
+                section_offset=float(question_off_x),
+            )
+            rois.append((rx, int(start_y), int(box_w), int(box_h)))
+        return rois, ""
+
+    def _evaluate_question_rois(
+        self,
+        processed_img: Optional[np.ndarray],
+        rois: Sequence[Tuple[int, int, int, int]],
+        debug_img: Optional[np.ndarray],
+        mark_threshold: float,
+        score_inner_ratio: float,
+    ) -> List[int]:
+        roi_scores: List[float] = []
+        roi_clamped: List[Optional[Tuple[int, int, int, int]]] = []
+        for rx, ry, rw, rh in rois:
+            clamped = self.image_processor.clamp_roi(processed_img, rx, ry, rw, rh)
+            ratio, _ = self.image_processor.roi_fill_ratio(
+                processed_img,
+                rx,
+                ry,
+                rw,
+                rh,
+                inner_ratio=score_inner_ratio,
+            )
+            score = float(ratio) if ratio is not None else 0.0
+            roi_scores.append(score)
+            roi_clamped.append(clamped)
+            if debug_img is not None and clamped is not None:
+                x1, y1, w1, h1 = clamped
+                color = (0, 255, 0) if score >= mark_threshold else (0, 0, 255)
+                cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), color, 1)
+                cv2.putText(
+                    debug_img,
+                    f"{int(score * 100)}",
+                    (x1, y1 + h1 - 2),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.3,
+                    color,
+                    1,
+                )
+
+        marked_indices: List[int] = [int(i) for i, s in enumerate(roi_scores) if s >= mark_threshold]
+        if debug_img is not None and marked_indices:
+            for mi in marked_indices:
+                if 0 <= int(mi) < len(roi_clamped):
+                    rc = roi_clamped[int(mi)]
+                    if rc is None:
+                        continue
+                    x1, y1, w1, h1 = rc
+                    c = (0, 255, 0) if len(marked_indices) == 1 else (0, 165, 255)
+                    cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), c, 2)
+        return marked_indices
+
     def analyze_sheet_cv(
         self,
         original_img: Optional[np.ndarray],
@@ -984,7 +1354,7 @@ class OMRScanner:
                 layout_config=layout,
                 scale=scale,
             )
-            ctx_error = str(scan_ctx.get("error_status", "") or "")
+            ctx_error = str(scan_ctx["error_status"] or "")
             if ctx_error == "IMG_NONE":
                 return "ERR", [], None, "IMG_NONE"
             if ctx_error == "PREPROCESS":
@@ -992,10 +1362,10 @@ class OMRScanner:
             if ctx_error:
                 return "ERR", [], None, ctx_error
 
-            work_img = scan_ctx.get("work_img")
-            processed_img = scan_ctx.get("processed_img")
-            debug_img = scan_ctx.get("debug_img")
-            markers = list(scan_ctx.get("markers") or [])
+            work_img = scan_ctx["work_img"]
+            processed_img = scan_ctx["processed_img"]
+            debug_img = scan_ctx["debug_img"]
+            markers = list(scan_ctx["markers"])
             if debug_img is not None:
                 for m in markers:
                     cv2.circle(debug_img, (int(m.cx), int(m.cy)), 3, (0, 0, 255), -1)
@@ -1005,153 +1375,36 @@ class OMRScanner:
 
             marks_by_y = sorted(markers, key=lambda m: int(m.cy))
             marks_by_x = sorted(markers, key=lambda m: int(m.cx))
-            prepared: List[Dict[str, int]] = []
-            for i, q in enumerate(questions):
-                if not isinstance(q, dict):
-                    continue
-                q_num = int(q.get("no", i + 1))
-                choices_count = max(1, int(q.get("choices", 5)))
-
-                if is_horizontal_target:
-                    col_index = q.get("col_index")
-                    row_in_col = q.get("row_in_col")
-                    if col_index is None or row_in_col is None:
-                        idx = int(q_num) - 1
-                        if numbering_order == "row_major":
-                            cols = int(layout_columns) if int(layout_columns) > 0 else 1
-                            cols = max(1, cols)
-                            col_index = idx % cols
-                            row_in_col = idx // cols
-                        else:
-                            col_index = idx // rows_per_col
-                            row_in_col = idx % rows_per_col
-                    prepared.append(
-                        {
-                            "q_num": q_num,
-                            "choices": choices_count,
-                            "col_index": int(col_index),
-                            "row_in_col": int(row_in_col),
-                        }
-                    )
-                else:
-                    row_index = q.get("row_index")
-                    if row_index is None:
-                        row_index = i
-                    prepared.append(
-                        {
-                            "q_num": q_num,
-                            "choices": choices_count,
-                            "row_index": int(row_index),
-                        }
-                    )
+            prepared = self._prepare_marker_question_items(
+                questions=questions,
+                layout=layout,
+                is_horizontal_target=is_horizontal_target,
+                numbering_order=numbering_order,
+                layout_columns=layout_columns,
+                rows_per_col=rows_per_col,
+            )
 
             if not prepared:
                 return "ERR", [], debug_img, "TIMING_MARK"
 
-            col_anchor_map: Dict[int, Marker] = {}
-            row_anchor_map: Dict[int, Marker] = {}
-            if is_horizontal_target:
-                needed_cols = sorted({int(item["col_index"]) for item in prepared})
-                if not needed_cols or needed_cols[0] < 0:
-                    return "ERR", [], debug_img, "TIMING_MARK"
-
-                fixed_anchor_mode = self._to_bool(layout.get("fixed_anchor_mode", False), False)
-                raw_anchor_indices = layout.get("column_anchor_indices", [])
-                anchor_index_base = int(layout.get("column_anchor_index_base", 1))
-                use_fixed = fixed_anchor_mode and isinstance(raw_anchor_indices, list) and len(raw_anchor_indices) > 0
-                base_marks_for_fixed = marks_by_x[(marker_start_index - 1) :] if (marker_start_index - 1) < len(marks_by_x) else []
-
-                for col in needed_cols:
-                    if use_fixed:
-                        if col >= len(raw_anchor_indices):
-                            return "ERR", [], debug_img, "TIMING_MARK"
-                        try:
-                            idx0 = int(raw_anchor_indices[col]) - anchor_index_base
-                        except Exception:
-                            return "ERR", [], debug_img, "TIMING_MARK"
-                        if not (0 <= idx0 < len(base_marks_for_fixed)):
-                            return "ERR", [], debug_img, "TIMING_MARK"
-                        col_anchor_map[col] = base_marks_for_fixed[idx0]
-                    else:
-                        idx0 = (marker_start_index - 1) + col
-                        if not (0 <= idx0 < len(marks_by_x)):
-                            return "ERR", [], debug_img, "TIMING_MARK"
-                        col_anchor_map[col] = marks_by_x[idx0]
-
-                if use_fixed:
-                    fixed_anchor_y_mode = str(layout.get("fixed_anchor_y_mode", "")).strip().lower()
-                    if fixed_anchor_y_mode == "median" and col_anchor_map:
-                        med_y = int(
-                            round(
-                                float(
-                                    np.median(
-                                        np.asarray([int(col_anchor_map[c].cy) for c in needed_cols], dtype=np.float32)
-                                    )
-                                )
-                            )
-                        )
-                        for col in needed_cols:
-                            m = col_anchor_map[col]
-                            col_anchor_map[col] = Marker(
-                                cx=int(m.cx),
-                                cy=int(med_y),
-                                interpolated=bool(getattr(m, "interpolated", False)),
-                            )
-            else:
-                needed_rows = sorted({int(item["row_index"]) for item in prepared})
-                if not needed_rows or needed_rows[0] < 0:
-                    return "ERR", [], debug_img, "TIMING_MARK"
-
-                for row_idx in needed_rows:
-                    idx0 = (marker_start_index - 1) + row_idx
-                    if not (0 <= idx0 < len(marks_by_y)):
-                        return "ERR", [], debug_img, "TIMING_MARK"
-                    row_anchor_map[row_idx] = marks_by_y[idx0]
-            geometry_data = dict(scan_ctx.get("geometry_data") or {})
-            marker_axis = list(geometry_data.get("marker_axis") or (marks_by_x if is_horizontal_target else marks_by_y))
-            geom_scale_x = float(geometry_data.get("global_scale_x", scale))
-            geom_scale_y = float(geometry_data.get("global_scale_y", scale))
-
-            # Unified geometry:
-            # target = anchor + (config_offset * global_scale) + (config_offset * section_offset)
-            x_offset = self._scaled_config_offset("question", float(layout.get("x_offset", 600)), geom_scale_x)
-            raw_choice_dx = float(layout.get("choice_dx", 70))
-            effective_choice_dx = float(raw_choice_dx) * float(geom_scale_x)
-            box_w = max(1, int(round(float(layout.get("box_w", 40)) * geom_scale_x)))
-            box_h = max(1, int(round(float(layout.get("box_h", 40)) * geom_scale_y)))
-            row_offset_y = self._scaled_config_offset("question", float(layout.get("row_offset_y", 0)), geom_scale_y)
-            row_start_y = self._scaled_config_offset("question", float(layout.get("row_start_y", 360)), geom_scale_y)
-            raw_row_dy = float(layout.get("row_dy", 70))
-            effective_row_dy = float(raw_row_dy) * float(geom_scale_y)
-            question_off_x, question_off_y = self._combined_offset("question")
-            expected_w_scaled = float(geometry_data.get("expected_w_scaled", 0.0))
-            expected_h_scaled = float(geometry_data.get("expected_h_scaled", 0.0))
-            try:
-                expected_anchor_y = float(
-                    layout.get(
-                        "expected_anchor_y",
-                        layout.get("top_marker_y", layout.get("anchor_top_y", 0.0)),
-                    )
-                )
-            except Exception:
-                expected_anchor_y = 0.0
-            expected_anchor_y_scaled = float(expected_anchor_y) * float(geom_scale_y)
-            use_page_end_y_correction = self._to_bool(
-                layout.get("page_end_y_correction", is_horizontal_target),
-                is_horizontal_target,
+            col_anchor_map, row_anchor_map, anchor_error = self._build_marker_question_anchor_maps(
+                prepared=prepared,
+                layout=layout,
+                is_horizontal_target=is_horizontal_target,
+                marker_start_index=marker_start_index,
+                marks_by_x=marks_by_x,
+                marks_by_y=marks_by_y,
             )
-            try:
-                mark_threshold = float(layout.get("mark_threshold", self.pixel_threshold))
-            except Exception:
-                mark_threshold = float(self.pixel_threshold)
-            if (not np.isfinite(mark_threshold)) or mark_threshold <= 0.0:
-                mark_threshold = float(self.pixel_threshold)
+            if anchor_error:
+                return "ERR", [], debug_img, anchor_error
 
-            try:
-                score_inner_ratio = float(layout.get("score_inner_ratio", 0.18))
-            except Exception:
-                score_inner_ratio = 0.18
-            score_inner_ratio = float(np.clip(score_inner_ratio, 0.0, 0.45))
+            geometry_data = scan_ctx["geometry_data"]
+            decode_params = self._resolve_marker_question_decode_params(
+                layout=layout,
+                geometry_data=geometry_data,
+                scale=scale,
+                is_horizontal_target=is_horizontal_target,
+            )
 
             results: List[QuestionResult] = []
             has_error = False
@@ -1159,111 +1412,25 @@ class OMRScanner:
 
             for item in prepared:
                 q_num = int(item["q_num"])
-                choices_count = int(item["choices"])
+                rois, roi_error = self._build_marker_question_rois(
+                    item=item,
+                    is_horizontal_target=is_horizontal_target,
+                    row_start_from_marker=row_start_from_marker,
+                    col_anchor_map=col_anchor_map,
+                    row_anchor_map=row_anchor_map,
+                    decode_params=decode_params,
+                    work_img=work_img if isinstance(work_img, np.ndarray) else None,
+                )
+                if roi_error or rois is None:
+                    return "ERR", [], debug_img, (roi_error or "TIMING_MARK")
 
-                if is_horizontal_target:
-                    col_index = int(item["col_index"])
-                    if col_index not in col_anchor_map:
-                        return "ERR", [], debug_img, "TIMING_MARK"
-                    base_mark = col_anchor_map[col_index]
-                    base_cx = float(base_mark.cx)
-                    row_in_col = int(item.get("row_in_col", 0))
-                    anchor_y = float(base_mark.cy) if row_start_from_marker else 0.0
-                    relative_y = (float(row_start_y) + float(row_offset_y)) + (
-                        float(row_in_col) * float(effective_row_dy)
-                    )
-                    if use_page_end_y_correction and expected_h_scaled > 1e-6:
-                        page_gain = self._vertical_page_gain(
-                            anchor_y=anchor_y,
-                            img_h=int(work_img.shape[0]),
-                            expected_h_scaled=float(expected_h_scaled),
-                            expected_anchor_scaled=float(expected_anchor_y_scaled if row_start_from_marker else 0.0),
-                        )
-                        target_cy = int(round(anchor_y + (float(relative_y) * float(page_gain)) + float(question_off_y)))
-                    else:
-                        target_cy = self._indexed_axis_coord(
-                            anchor=float(anchor_y),
-                            axis_offset=(float(row_start_y) + float(row_offset_y)),
-                            axis_step=float(effective_row_dy),
-                            axis_index=row_in_col,
-                            section_offset=float(question_off_y),
-                        )
-                    start_y = int(round(target_cy - (box_h / 2.0)))
-                else:
-                    row_index = int(item["row_index"])
-                    if row_index not in row_anchor_map:
-                        return "ERR", [], debug_img, "TIMING_MARK"
-                    base_mark = row_anchor_map[row_index]
-                    base_cx = float(base_mark.cx)
-                    if row_start_from_marker:
-                        target_cy = self._indexed_axis_coord(
-                            anchor=float(base_mark.cy),
-                            axis_offset=(float(row_start_y) + float(row_offset_y)),
-                            axis_step=0.0,
-                            axis_index=0,
-                            section_offset=float(question_off_y),
-                        )
-                    else:
-                        target_cy = self._indexed_axis_coord(
-                            anchor=0.0,
-                            axis_offset=(float(row_start_y) + float(row_offset_y)),
-                            axis_step=float(effective_row_dy),
-                            axis_index=row_index,
-                            section_offset=float(question_off_y),
-                        )
-                    start_y = int(round(target_cy - (box_h / 2.0)))
-
-                rois: List[Tuple[int, int, int, int]] = []
-                for c_idx in range(choices_count):
-                    rx = self._indexed_axis_coord(
-                        anchor=float(base_cx),
-                        axis_offset=float(x_offset),
-                        axis_step=float(effective_choice_dx),
-                        axis_index=c_idx,
-                        section_offset=float(question_off_x),
-                    )
-                    rois.append((rx, int(start_y), int(box_w), int(box_h)))
-
-                roi_scores: List[float] = []
-                roi_clamped: List[Optional[Tuple[int, int, int, int]]] = []
-                for r_idx, (rx, ry, rw, rh) in enumerate(rois):
-                    clamped = self.image_processor.clamp_roi(processed_img, rx, ry, rw, rh)
-                    ratio, _ = self.image_processor.roi_fill_ratio(
-                        processed_img,
-                        rx,
-                        ry,
-                        rw,
-                        rh,
-                        inner_ratio=score_inner_ratio,
-                    )
-                    score = float(ratio) if ratio is not None else 0.0
-                    roi_scores.append(score)
-                    roi_clamped.append(clamped)
-                    if debug_img is not None and clamped is not None:
-                        x1, y1, w1, h1 = clamped
-                        color = (0, 255, 0) if score >= mark_threshold else (0, 0, 255)
-                        cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), color, 1)
-                        cv2.putText(
-                            debug_img,
-                            f"{int(score * 100)}",
-                            (x1, y1 + h1 - 2),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.3,
-                            color,
-                            1,
-                        )
-
-                marked_indices: List[int] = [int(i) for i, s in enumerate(roi_scores) if s >= mark_threshold]
-
-                if debug_img is not None and marked_indices:
-                    for mi in marked_indices:
-                        if 0 <= int(mi) < len(roi_clamped):
-                            rc = roi_clamped[int(mi)]
-                            if rc is None:
-                                continue
-                            x1, y1, w1, h1 = rc
-                            c = (0, 255, 0) if len(marked_indices) == 1 else (0, 165, 255)
-                            cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), c, 2)
+                marked_indices = self._evaluate_question_rois(
+                    processed_img=processed_img,
+                    rois=rois,
+                    debug_img=debug_img,
+                    mark_threshold=float(decode_params["mark_threshold"]),
+                    score_inner_ratio=float(decode_params["score_inner_ratio"]),
+                )
 
                 status = self._determine_status(marked_indices)
                 if status != "정상":
@@ -1322,6 +1489,158 @@ class OMRScanner:
                 picked = str(item["label"])
         return (hits == 1), (picked if hits == 1 else "")
 
+    def _resolve_marker_column_common_params(
+        self,
+        processed_img: Optional[np.ndarray],
+        markers: Sequence[Marker],
+        cfg: Dict[str, Any],
+        scale: float,
+        section_key: str,
+        global_scale_x: Optional[float] = None,
+        global_scale_y: Optional[float] = None,
+        layout_cfg: Optional[Dict[str, Any]] = None,
+    ) -> MarkerColumnCommonParams:
+        scale_x = float(scale if global_scale_x is None else global_scale_x)
+        scale_y = float(scale if global_scale_y is None else global_scale_y)
+        x_offset = self._scaled_config_offset(section_key, float(cfg.get("x_offset", 0)), scale_x)
+        y_offset = self._scaled_config_offset(section_key, float(cfg.get("y_offset", 0)), scale_y)
+        box_w = max(1, int(round(float(cfg.get("box_w", 40)) * float(scale_x))))
+        box_h = max(1, int(round(float(cfg.get("box_h", 40)) * float(scale_y))))
+        off_x, off_y = self._combined_offset(section_key)
+
+        anchor_y_mode = str(cfg.get("anchor_y_mode", "median")).strip().lower()
+        img_w = int(processed_img.shape[1]) if processed_img is not None else 0
+        img_h = int(processed_img.shape[0]) if processed_img is not None else 0
+        _, expected_h_scaled = self._resolve_scaled_layout_canvas(
+            layout_cfg,
+            img_w=img_w,
+            img_h=img_h,
+            base_scale=float(scale),
+        )
+        try:
+            expected_anchor_y = float(
+                cfg.get(
+                    "expected_anchor_y",
+                    (layout_cfg or {}).get(
+                        "expected_anchor_y",
+                        (layout_cfg or {}).get("top_marker_y", (layout_cfg or {}).get("anchor_top_y", 0.0)),
+                    ),
+                )
+            )
+        except Exception:
+            expected_anchor_y = 0.0
+        expected_anchor_y_scaled = float(expected_anchor_y) * float(scale_y)
+        markers_horizontal = self._markers_span_is_horizontal(markers)
+        use_page_end_y_correction = self._to_bool(
+            cfg.get("page_end_y_correction", markers_horizontal),
+            markers_horizontal,
+        )
+
+        return {
+            "scale_x": float(scale_x),
+            "scale_y": float(scale_y),
+            "x_offset": float(x_offset),
+            "y_offset": float(y_offset),
+            "box_w": int(box_w),
+            "box_h": int(box_h),
+            "off_x": int(off_x),
+            "off_y": int(off_y),
+            "anchor_y_mode": str(anchor_y_mode),
+            "expected_h_scaled": float(expected_h_scaled),
+            "expected_anchor_y_scaled": float(expected_anchor_y_scaled),
+            "use_page_end_y_correction": bool(use_page_end_y_correction),
+        }
+
+    def _resolve_marker_column_anchor_pose(
+        self,
+        processed_img: Optional[np.ndarray],
+        markers: Sequence[Marker],
+        base: Marker,
+        common_params: MarkerColumnCommonParams,
+    ) -> Tuple[int, float, float]:
+        center_x = int(
+            round(
+                float(base.cx)
+                + float(common_params["x_offset"])
+                + float(common_params["off_x"])
+            )
+        )
+        base_cy = self._marker_anchor_y(markers, base, anchor_y_mode=str(common_params["anchor_y_mode"]))
+        page_gain = 1.0
+        if (
+            bool(common_params["use_page_end_y_correction"])
+            and float(common_params["expected_h_scaled"]) > 1e-6
+            and processed_img is not None
+        ):
+            page_gain = self._vertical_page_gain(
+                anchor_y=float(base_cy),
+                img_h=int(processed_img.shape[0]),
+                expected_h_scaled=float(common_params["expected_h_scaled"]),
+                expected_anchor_scaled=float(common_params["expected_anchor_y_scaled"]),
+            )
+        return int(center_x), float(base_cy), float(page_gain)
+
+    def _marker_column_rect_from_relative_y(
+        self,
+        center_x: int,
+        base_cy: float,
+        page_gain: float,
+        relative_y: float,
+        common_params: MarkerColumnCommonParams,
+    ) -> Tuple[int, int, int, int]:
+        box_w = int(common_params["box_w"])
+        box_h = int(common_params["box_h"])
+        off_y = int(common_params["off_y"])
+        center_y = int(round(float(base_cy) + (float(relative_y) * float(page_gain)) + float(off_y)))
+        rx = int(center_x - (box_w // 2))
+        ry = int(center_y - (box_h // 2))
+        return int(rx), int(ry), int(box_w), int(box_h)
+
+    def _scan_marker_digit_rows(
+        self,
+        processed_img: Optional[np.ndarray],
+        debug_img: Optional[np.ndarray],
+        center_x: int,
+        base_cy: float,
+        page_gain: float,
+        rows: int,
+        y_offset: float,
+        effective_row_dy: float,
+        common_params: MarkerColumnCommonParams,
+    ) -> Tuple[int, int, Optional[Tuple[int, int, int, int]]]:
+        best_r = -1
+        best_ratio = -1.0
+        best_rect: Optional[Tuple[int, int, int, int]] = None
+        hits = 0
+        for r_idx in range(rows):
+            relative_y = float(y_offset) + (float(r_idx) * float(effective_row_dy))
+            rx, ry, box_w, box_h = self._marker_column_rect_from_relative_y(
+                center_x=center_x,
+                base_cy=base_cy,
+                page_gain=page_gain,
+                relative_y=relative_y,
+                common_params=common_params,
+            )
+            marked, ratio, clamped, _ = self.image_processor.check_roi(
+                processed_img, rx, ry, box_w, box_h, self.pixel_threshold
+            )
+            if debug_img is not None and clamped is not None:
+                x1, y1, w1, h1 = clamped
+                color = (0, 255, 0) if marked else (0, 0, 255)
+                cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), color, 1)
+            if marked:
+                hits += 1
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    best_r = r_idx
+                    best_rect = clamped
+
+        if debug_img is not None and best_r >= 0 and best_rect is not None:
+            x1, y1, w1, h1 = best_rect
+            color = (0, 255, 0) if hits == 1 else (0, 0, 255)
+            cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), color, 2)
+        return int(hits), int(best_r), best_rect
+
     def _decode_marker_digit_columns(
         self,
         processed_img: Optional[np.ndarray],
@@ -1347,40 +1666,20 @@ class OMRScanner:
         if not isinstance(rows_per_digit, list):
             rows_per_digit = []
 
-        scale_x = float(scale if global_scale_x is None else global_scale_x)
-        scale_y = float(scale if global_scale_y is None else global_scale_y)
-        x_offset = self._scaled_config_offset(section_key, float(cfg.get("x_offset", 0)), scale_x)
-        y_offset = self._scaled_config_offset(section_key, float(cfg.get("y_offset", 0)), scale_y)
+        common_params = self._resolve_marker_column_common_params(
+            processed_img=processed_img,
+            markers=markers,
+            cfg=cfg,
+            scale=scale,
+            section_key=section_key,
+            global_scale_x=global_scale_x,
+            global_scale_y=global_scale_y,
+            layout_cfg=layout_cfg,
+        )
+        scale_y = float(common_params["scale_y"])
+        y_offset = float(common_params["y_offset"])
         raw_row_dy = float(cfg.get("row_dy", cfg.get("row_h", 20)))
         effective_row_dy = float(raw_row_dy) * float(scale_y)
-        box_w = max(1, int(round(float(cfg.get("box_w", 40)) * float(scale_x))))
-        box_h = max(1, int(round(float(cfg.get("box_h", 40)) * float(scale_y))))
-        off_x, off_y = self._combined_offset(section_key)
-
-        anchor_y_mode = str(cfg.get("anchor_y_mode", "median")).strip().lower()
-        expected_w_scaled, expected_h_scaled = self._resolve_scaled_layout_canvas(
-            layout_cfg,
-            img_w=int(processed_img.shape[1]),
-            img_h=int(processed_img.shape[0]),
-            base_scale=float(scale),
-        )
-        try:
-            expected_anchor_y = float(
-                cfg.get(
-                    "expected_anchor_y",
-                    (layout_cfg or {}).get(
-                        "expected_anchor_y",
-                        (layout_cfg or {}).get("top_marker_y", (layout_cfg or {}).get("anchor_top_y", 0.0)),
-                    ),
-                )
-            )
-        except Exception:
-            expected_anchor_y = 0.0
-        expected_anchor_y_scaled = float(expected_anchor_y) * float(scale_y)
-        use_page_end_y_correction = self._to_bool(
-            cfg.get("page_end_y_correction", self._markers_span_is_horizontal(markers)),
-            self._markers_span_is_horizontal(markers),
-        )
 
         result: List[str] = []
         overall_ok = True
@@ -1401,43 +1700,23 @@ class OMRScanner:
                 continue
 
             base = markers[m_idx]
-            center_x = int(round(float(base.cx) + float(x_offset) + float(off_x)))
-            base_cy = self._marker_anchor_y(markers, base, anchor_y_mode=anchor_y_mode)
-            page_gain = 1.0
-            if use_page_end_y_correction and expected_h_scaled > 1e-6:
-                page_gain = self._vertical_page_gain(
-                    anchor_y=float(base_cy),
-                    img_h=int(processed_img.shape[0]),
-                    expected_h_scaled=float(expected_h_scaled),
-                    expected_anchor_scaled=float(expected_anchor_y_scaled),
-                )
-            best_r = -1
-            best_ratio = -1.0
-            best_rect: Optional[Tuple[int, int, int, int]] = None
-            hits = 0
-            for r_idx in range(rows):
-                relative_y = float(y_offset) + (float(r_idx) * float(effective_row_dy))
-                center_y = int(round(float(base_cy) + (float(relative_y) * float(page_gain)) + float(off_y)))
-                rx = int(center_x - (box_w // 2))
-                ry = int(center_y - (box_h // 2))
-                marked, ratio, clamped, _ = self.image_processor.check_roi(
-                    processed_img, rx, ry, box_w, box_h, self.pixel_threshold
-                )
-                if debug_img is not None:
-                    if clamped is not None:
-                        x1, y1, w1, h1 = clamped
-                        color = (0, 255, 0) if marked else (0, 0, 255)
-                        cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), color, 1)
-                if marked:
-                    hits += 1
-                    if ratio > best_ratio:
-                        best_ratio = ratio
-                        best_r = r_idx
-                        best_rect = clamped
-            if debug_img is not None and best_r >= 0 and best_rect is not None:
-                x1, y1, w1, h1 = best_rect
-                color = (0, 255, 0) if hits == 1 else (0, 0, 255)
-                cv2.rectangle(debug_img, (x1, y1), (x1 + w1, y1 + h1), color, 2)
+            center_x, base_cy, page_gain = self._resolve_marker_column_anchor_pose(
+                processed_img=processed_img,
+                markers=markers,
+                base=base,
+                common_params=common_params,
+            )
+            hits, best_r, _ = self._scan_marker_digit_rows(
+                processed_img=processed_img,
+                debug_img=debug_img,
+                center_x=center_x,
+                base_cy=base_cy,
+                page_gain=page_gain,
+                rows=rows,
+                y_offset=y_offset,
+                effective_row_dy=effective_row_dy,
+                common_params=common_params,
+            )
             if hits == 1 and best_r >= 0:
                 result.append(str(best_r))
             else:
@@ -1482,10 +1761,18 @@ class OMRScanner:
         if not labels:
             return False, ""
 
-        scale_x = float(scale if global_scale_x is None else global_scale_x)
-        scale_y = float(scale if global_scale_y is None else global_scale_y)
-        x_offset = self._scaled_config_offset(section_key, float(cfg.get("x_offset", 0)), scale_x)
-        y_offset = self._scaled_config_offset(section_key, float(cfg.get("y_offset", 0)), scale_y)
+        common_params = self._resolve_marker_column_common_params(
+            processed_img=processed_img,
+            markers=markers,
+            cfg=cfg,
+            scale=scale,
+            section_key=section_key,
+            global_scale_x=global_scale_x,
+            global_scale_y=global_scale_y,
+            layout_cfg=layout_cfg,
+        )
+        scale_y = float(common_params["scale_y"])
+        y_offset = float(common_params["y_offset"])
         raw_choice_dy = float(cfg.get("choice_dy", cfg.get("row_dy", 40)))
         effective_choice_dy = float(raw_choice_dy) * float(scale_y)
         raw_choice_offsets = cfg.get("choice_y_offsets", [])
@@ -1496,45 +1783,14 @@ class OMRScanner:
                     choice_offsets.append(float(value) * float(scale_y))
                 except Exception:
                     continue
-        box_w = max(1, int(round(float(cfg.get("box_w", 40)) * float(scale_x))))
-        box_h = max(1, int(round(float(cfg.get("box_h", 40)) * float(scale_y))))
-        off_x, off_y = self._combined_offset(section_key)
-        expected_w_scaled, expected_h_scaled = self._resolve_scaled_layout_canvas(
-            layout_cfg,
-            img_w=int(processed_img.shape[1]),
-            img_h=int(processed_img.shape[0]),
-            base_scale=float(scale),
-        )
-        try:
-            expected_anchor_y = float(
-                cfg.get(
-                    "expected_anchor_y",
-                    (layout_cfg or {}).get(
-                        "expected_anchor_y",
-                        (layout_cfg or {}).get("top_marker_y", (layout_cfg or {}).get("anchor_top_y", 0.0)),
-                    ),
-                )
-            )
-        except Exception:
-            expected_anchor_y = 0.0
-        expected_anchor_y_scaled = float(expected_anchor_y) * float(scale_y)
-        use_page_end_y_correction = self._to_bool(
-            cfg.get("page_end_y_correction", self._markers_span_is_horizontal(markers)),
-            self._markers_span_is_horizontal(markers),
-        )
 
         base = markers[marker_index]
-        center_x = int(round(float(base.cx) + float(x_offset) + float(off_x)))
-        anchor_y_mode = str(cfg.get("anchor_y_mode", "median")).strip().lower()
-        base_cy = self._marker_anchor_y(markers, base, anchor_y_mode=anchor_y_mode)
-        page_gain = 1.0
-        if use_page_end_y_correction and expected_h_scaled > 1e-6:
-            page_gain = self._vertical_page_gain(
-                anchor_y=float(base_cy),
-                img_h=int(processed_img.shape[0]),
-                expected_h_scaled=float(expected_h_scaled),
-                expected_anchor_scaled=float(expected_anchor_y_scaled),
-            )
+        center_x, base_cy, page_gain = self._resolve_marker_column_anchor_pose(
+            processed_img=processed_img,
+            markers=markers,
+            base=base,
+            common_params=common_params,
+        )
         hits = 0
         picked = ""
         for idx, label in enumerate(labels):
@@ -1545,9 +1801,13 @@ class OMRScanner:
                 relative_y += float(per_choice_offsets[idx]) * float(scale_y)
             else:
                 relative_y += float(idx) * float(effective_choice_dy)
-            center_y = int(round(float(base_cy) + (float(relative_y) * float(page_gain)) + float(off_y)))
-            rx = center_x - (box_w // 2)
-            ry = center_y - (box_h // 2)
+            rx, ry, box_w, box_h = self._marker_column_rect_from_relative_y(
+                center_x=center_x,
+                base_cy=base_cy,
+                page_gain=page_gain,
+                relative_y=relative_y,
+                common_params=common_params,
+            )
             if self._check_roi(
                 processed_img,
                 rx,
@@ -1561,6 +1821,231 @@ class OMRScanner:
                 hits += 1
                 picked = label
         return (hits == 1), (picked if hits == 1 else "")
+
+    def _normalize_custom_fields(
+        self,
+        fields: Sequence[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        marker_field_types = {"marker_digit_columns", "marker_single_choice_column"}
+        normalized_fields: List[Dict[str, Any]] = []
+        for field in fields:
+            if not isinstance(field, dict):
+                continue
+            cfg = dict(field)
+            eff_type = self._effective_field_type(cfg)
+            cfg["type"] = eff_type
+            if eff_type in marker_field_types:
+                cfg.setdefault("anchor_y_mode", "median")
+            normalized_fields.append(cfg)
+        return normalized_fields
+
+    def _resolve_custom_field_marker_context(
+        self,
+        full_layout: Dict[str, Any],
+        normalized_fields: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        marker_field_types = {"marker_digit_columns", "marker_single_choice_column"}
+        marker_fields = [
+            f
+            for f in normalized_fields
+            if str(f.get("type", "")).strip().lower() in marker_field_types
+        ]
+        marker_field = next(
+            (
+                f
+                for f in normalized_fields
+                if str(f.get("type", "")).strip().lower() in marker_field_types
+            ),
+            None,
+        )
+
+        marker_location = "left"
+        context_layout = dict(full_layout)
+        marker_location_for_context = ""
+        if marker_field is not None:
+            marker_location = str(marker_field.get("marker_location", "left")).strip().lower()
+            marker_location_for_context = marker_location
+            for key in ("deskew_with_markers", "deskew_max_deg", "deskew_min_deg", "deskew_inlier_percentile"):
+                if marker_field.get(key) is not None:
+                    context_layout[key] = marker_field.get(key)
+
+        return {
+            "marker_fields": marker_fields,
+            "marker_field": marker_field,
+            "marker_location": marker_location,
+            "marker_location_for_context": marker_location_for_context,
+            "context_layout": context_layout,
+        }
+
+    def _prepare_custom_field_decode_state(
+        self,
+        normalized_fields: Sequence[Dict[str, Any]],
+        marker_fields: Sequence[Dict[str, Any]],
+        marker_field: Optional[Dict[str, Any]],
+        scan_ctx: ScanContext,
+        work_img: Optional[np.ndarray],
+        full_layout: Dict[str, Any],
+        scale: float,
+        marker_location: str,
+    ) -> Dict[str, Any]:
+        geometry_data = dict(scan_ctx["geometry_data"])
+        axis_key = str(scan_ctx["axis_key"])
+        marker_axis: List[Marker] = list(scan_ctx["marker_axis"])
+
+        if marker_field is not None:
+            required_idx = self._required_marker_index_for_fields(normalized_fields)
+            if required_idx > 0 and len(marker_axis) < required_idx:
+                cluster_axis = self._select_contiguous_marker_cluster(
+                    marker_axis,
+                    axis_key=axis_key,
+                    required_count=required_idx,
+                    prefer_low_axis=True,
+                )
+                if cluster_axis:
+                    marker_axis = cluster_axis
+
+        marker_axis_for_decode = list(marker_axis)
+        if marker_axis_for_decode and marker_fields:
+            max_required_idx = self._required_marker_index_for_fields(marker_fields)
+            allow_interp_shared = any(
+                self._to_bool(f.get("use_marker_interpolation", False), False) for f in marker_fields
+            )
+            if allow_interp_shared and max_required_idx > len(marker_axis_for_decode):
+                interp_axis = self.marker_detector.interpolate_missing_marks(marker_axis_for_decode)
+                if len(interp_axis) > len(marker_axis_for_decode):
+                    marker_axis_for_decode = sorted(interp_axis, key=lambda m: int(getattr(m, axis_key, 0)))
+
+        global_scale_x = float(geometry_data.get("global_scale_x", scale))
+        global_scale_y = float(geometry_data.get("global_scale_y", scale))
+        marker_axis_changed = (
+            len(marker_axis_for_decode) != len(marker_axis)
+            or any(
+                (int(a.cx) != int(b.cx)) or (int(a.cy) != int(b.cy))
+                for a, b in zip(marker_axis_for_decode, marker_axis)
+            )
+        )
+        if marker_axis_for_decode and marker_axis_changed and work_img is not None:
+            geometry_data = self._build_scan_geometry_data(
+                work_img,
+                marker_axis_for_decode,
+                marker_location,
+                scale,
+                full_layout,
+            )
+            global_scale_x = float(geometry_data.get("global_scale_x", scale))
+            global_scale_y = float(geometry_data.get("global_scale_y", scale))
+
+        return {
+            "geometry_data": geometry_data,
+            "axis_key": axis_key,
+            "marker_axis": marker_axis,
+            "marker_axis_for_decode": marker_axis_for_decode,
+            "global_scale_x": float(global_scale_x),
+            "global_scale_y": float(global_scale_y),
+        }
+
+    def _decode_custom_marker_field(
+        self,
+        processed_img: Optional[np.ndarray],
+        marker_axis_for_decode: Sequence[Marker],
+        field_cfg: Dict[str, Any],
+        scale: float,
+        draw_img: Optional[np.ndarray],
+        section_key: str,
+        global_scale_x: float,
+        global_scale_y: float,
+        full_layout: Dict[str, Any],
+    ) -> Tuple[bool, str]:
+        if not marker_axis_for_decode:
+            return False, ""
+        field_type = str(field_cfg.get("type", "")).strip().lower()
+        cfg = dict(field_cfg)
+        if field_type == "marker_digit_columns":
+            return self._decode_marker_digit_columns(
+                processed_img,
+                marker_axis_for_decode,
+                cfg,
+                scale,
+                draw_img,
+                section_key=section_key,
+                global_scale_x=global_scale_x,
+                global_scale_y=global_scale_y,
+                layout_cfg=full_layout,
+            )
+        if field_type == "marker_single_choice_column":
+            return self._decode_marker_single_choice_column(
+                processed_img,
+                marker_axis_for_decode,
+                cfg,
+                scale,
+                draw_img,
+                section_key=section_key,
+                global_scale_x=global_scale_x,
+                global_scale_y=global_scale_y,
+                layout_cfg=full_layout,
+            )
+        return False, ""
+
+    def _decode_custom_fields_values(
+        self,
+        normalized_fields: Sequence[Dict[str, Any]],
+        processed_img: Optional[np.ndarray],
+        debug_img: Optional[np.ndarray],
+        marker_axis_for_decode: Sequence[Marker],
+        scale: float,
+        global_scale_x: float,
+        global_scale_y: float,
+        full_layout: Dict[str, Any],
+    ) -> Tuple[bool, Dict[str, Any]]:
+        info: Dict[str, Any] = {}
+        is_ok = True
+        for field in normalized_fields:
+            if not isinstance(field, dict):
+                continue
+            f_name = field.get("name")
+            f_type = str(field.get("type", "")).strip().lower()
+            if not f_name or not f_type:
+                continue
+            section_key = self._infer_field_section(field)
+            if f_type == "marker_digit_columns":
+                if not marker_axis_for_decode:
+                    ok, val = False, ""
+                else:
+                    ok, val = self._decode_custom_marker_field(
+                        processed_img=processed_img,
+                        marker_axis_for_decode=marker_axis_for_decode,
+                        field_cfg=field,
+                        scale=scale,
+                        draw_img=debug_img,
+                        section_key=section_key,
+                        global_scale_x=global_scale_x,
+                        global_scale_y=global_scale_y,
+                        full_layout=full_layout,
+                    )
+            elif f_type == "marker_single_choice_column":
+                if not marker_axis_for_decode:
+                    ok, val = False, ""
+                else:
+                    ok, val = self._decode_custom_marker_field(
+                        processed_img=processed_img,
+                        marker_axis_for_decode=marker_axis_for_decode,
+                        field_cfg=field,
+                        scale=scale,
+                        draw_img=debug_img,
+                        section_key=section_key,
+                        global_scale_x=global_scale_x,
+                        global_scale_y=global_scale_y,
+                        full_layout=full_layout,
+                    )
+            else:
+                # Marker-only mode: non-marker field types are intentionally unsupported.
+                ok, val = False, ""
+
+            if ok:
+                info[str(f_name)] = val
+            else:
+                is_ok = False
+        return is_ok, info
 
     def analyze_candidate_info(
         self,
@@ -1605,43 +2090,13 @@ class OMRScanner:
             return False, {}, None
 
         full_layout = layout if isinstance(layout, dict) else {}
-        marker_field_types = {"marker_digit_columns", "marker_single_choice_column"}
-        normalized_fields: List[Dict[str, Any]] = []
-        for field in fields:
-            if not isinstance(field, dict):
-                continue
-            cfg = dict(field)
-            eff_type = self._effective_field_type(cfg)
-            cfg["type"] = eff_type
-            if eff_type in marker_field_types:
-                cfg.setdefault("anchor_y_mode", "median")
-            normalized_fields.append(cfg)
-
-        marker_fields = [
-            f
-            for f in normalized_fields
-            if str(f.get("type", "")).strip().lower() in marker_field_types
-        ]
-        marker_field = next(
-            (
-                f
-                for f in normalized_fields
-                if str(f.get("type", "")).strip().lower() in marker_field_types
-            ),
-            None,
-        )
-
-        marker_location = "left"
-        axis_key = "cy"
-        marker_axis: List[Marker] = []
-        context_layout = dict(full_layout)
-        marker_location_for_context = ""
-        if marker_field is not None:
-            marker_location = str(marker_field.get("marker_location", "left")).strip().lower()
-            marker_location_for_context = marker_location
-            for key in ("deskew_with_markers", "deskew_max_deg", "deskew_min_deg", "deskew_inlier_percentile"):
-                if marker_field.get(key) is not None:
-                    context_layout[key] = marker_field.get(key)
+        normalized_fields = self._normalize_custom_fields(fields)
+        marker_context = self._resolve_custom_field_marker_context(full_layout, normalized_fields)
+        marker_fields = list(marker_context.get("marker_fields") or [])
+        marker_field = marker_context.get("marker_field")
+        marker_location = str(marker_context.get("marker_location", "left") or "left")
+        context_layout = dict(marker_context.get("context_layout") or full_layout)
+        marker_location_for_context = str(marker_context.get("marker_location_for_context", "") or "")
 
         scan_ctx = self._prepare_scan_context(
             original_img,
@@ -1649,123 +2104,33 @@ class OMRScanner:
             layout_config=context_layout,
             scale=scale,
         )
-        if str(scan_ctx.get("error_status", "") or ""):
+        if str(scan_ctx["error_status"] or ""):
             return False, {}, None
 
-        work_img = scan_ctx.get("work_img")
-        processed_img = scan_ctx.get("processed_img")
+        work_img = scan_ctx["work_img"]
+        processed_img = scan_ctx["processed_img"]
         if work_img is None or processed_img is None:
             return False, {}, None
         debug_img = np.zeros_like(work_img)
-        info: Dict[str, Any] = {}
-        is_ok = True
-        geometry_data = dict(scan_ctx.get("geometry_data") or {})
-        axis_key = str(scan_ctx.get("axis_key", "cy"))
-        marker_axis = list(scan_ctx.get("marker_axis") or [])
-
-        if marker_field is not None:
-            required_idx = self._required_marker_index_for_fields(normalized_fields)
-            if required_idx > 0 and len(marker_axis) < required_idx:
-                cluster_axis = self._select_contiguous_marker_cluster(
-                    marker_axis,
-                    axis_key=axis_key,
-                    required_count=required_idx,
-                    prefer_low_axis=True,
-                )
-                if cluster_axis:
-                    marker_axis = cluster_axis
-
-        marker_axis_for_decode = list(marker_axis)
-
-        if marker_axis_for_decode and marker_fields:
-            max_required_idx = self._required_marker_index_for_fields(marker_fields)
-            allow_interp_shared = any(
-                self._to_bool(f.get("use_marker_interpolation", False), False) for f in marker_fields
-            )
-            if allow_interp_shared and max_required_idx > len(marker_axis_for_decode):
-                interp_axis = self.marker_detector.interpolate_missing_marks(marker_axis_for_decode)
-                if len(interp_axis) > len(marker_axis_for_decode):
-                    marker_axis_for_decode = sorted(interp_axis, key=lambda m: int(getattr(m, axis_key, 0)))
-
-        global_scale_x = float(geometry_data.get("global_scale_x", scale))
-        global_scale_y = float(geometry_data.get("global_scale_y", scale))
-        marker_axis_changed = (
-            len(marker_axis_for_decode) != len(marker_axis)
-            or any(
-                (int(a.cx) != int(b.cx)) or (int(a.cy) != int(b.cy))
-                for a, b in zip(marker_axis_for_decode, marker_axis)
-            )
+        decode_state = self._prepare_custom_field_decode_state(
+            normalized_fields=normalized_fields,
+            marker_fields=marker_fields,
+            marker_field=marker_field if isinstance(marker_field, dict) else None,
+            scan_ctx=scan_ctx,
+            work_img=work_img if isinstance(work_img, np.ndarray) else None,
+            full_layout=full_layout,
+            scale=scale,
+            marker_location=marker_location,
         )
-        if marker_axis_for_decode and marker_axis_changed:
-            geometry_data = self._build_scan_geometry_data(
-                work_img,
-                marker_axis_for_decode,
-                marker_location,
-                scale,
-                full_layout,
-            )
-            global_scale_x = float(geometry_data.get("global_scale_x", scale))
-            global_scale_y = float(geometry_data.get("global_scale_y", scale))
 
-        def _decode_marker_field(
-            field_cfg: Dict[str, Any],
-            draw_img: Optional[np.ndarray],
-            section_key: str,
-        ) -> Tuple[bool, str]:
-            if not marker_axis_for_decode:
-                return False, ""
-            field_type = str(field_cfg.get("type", "")).strip().lower()
-            cfg = dict(field_cfg)
-            if field_type == "marker_digit_columns":
-                return self._decode_marker_digit_columns(
-                    processed_img,
-                    marker_axis_for_decode,
-                    cfg,
-                    scale,
-                    draw_img,
-                    section_key=section_key,
-                    global_scale_x=global_scale_x,
-                    global_scale_y=global_scale_y,
-                    layout_cfg=full_layout,
-                )
-            if field_type == "marker_single_choice_column":
-                return self._decode_marker_single_choice_column(
-                    processed_img,
-                    marker_axis_for_decode,
-                    cfg,
-                    scale,
-                    draw_img,
-                    section_key=section_key,
-                    global_scale_x=global_scale_x,
-                    global_scale_y=global_scale_y,
-                    layout_cfg=full_layout,
-                )
-            return False, ""
-
-        for field in normalized_fields:
-            if not isinstance(field, dict):
-                continue
-            f_name = field.get("name")
-            f_type = str(field.get("type", "")).strip().lower()
-            if not f_name or not f_type:
-                continue
-            section_key = self._infer_field_section(field)
-            if f_type == "marker_digit_columns":
-                if not marker_axis_for_decode:
-                    ok, val = False, ""
-                else:
-                    ok, val = _decode_marker_field(field, debug_img, section_key=section_key)
-            elif f_type == "marker_single_choice_column":
-                if not marker_axis_for_decode:
-                    ok, val = False, ""
-                else:
-                    ok, val = _decode_marker_field(field, debug_img, section_key=section_key)
-            else:
-                # Marker-only mode: non-marker field types are intentionally unsupported.
-                ok, val = False, ""
-
-            if ok:
-                info[str(f_name)] = val
-            else:
-                is_ok = False
+        is_ok, info = self._decode_custom_fields_values(
+            normalized_fields=normalized_fields,
+            processed_img=processed_img,
+            debug_img=debug_img,
+            marker_axis_for_decode=list(decode_state.get("marker_axis_for_decode") or []),
+            scale=scale,
+            global_scale_x=float(decode_state.get("global_scale_x", scale)),
+            global_scale_y=float(decode_state.get("global_scale_y", scale)),
+            full_layout=full_layout,
+        )
         return is_ok, info, debug_img
