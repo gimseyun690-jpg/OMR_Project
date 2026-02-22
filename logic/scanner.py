@@ -17,7 +17,7 @@ class ImageProcessor:
         self,
         block_size: int = 15,
         c_value: int = 7,
-        red_cutoff: int = 130,
+        red_cutoff: int = 180,
         open_kernel: int = 3,
     ):
         self.block_size = int(block_size) if int(block_size) % 2 == 1 else int(block_size) + 1

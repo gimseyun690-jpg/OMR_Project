@@ -1,6 +1,7 @@
 import os
 from importlib import import_module
 from PySide2.QtCore import Qt, Signal, QPoint, QPointF, QSettings, QPropertyAnimation, QEasingCurve
+from PySide2.QtGui import QColor
 from PySide2.QtWidgets import (
     QApplication,
     QWidget,
@@ -17,6 +18,7 @@ from PySide2.QtWidgets import (
     QGroupBox,
     QComboBox,
     QSpinBox,
+    QDoubleSpinBox,
     QGraphicsDropShadowEffect,
     QStackedWidget,
 )
@@ -84,12 +86,19 @@ class HomeCard(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 20, 24, 20)
-        layout.setSpacing(10)
+        layout.setSpacing(12)
 
-        self.icon_label = QLabel()
+        self.icon_wrap = QWidget()
+        self.icon_wrap.setObjectName("homeCardIconWrap")
+        icon_wrap_layout = QVBoxLayout(self.icon_wrap)
+        icon_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        icon_wrap_layout.setSpacing(0)
+
+        self.icon_label = QLabel(self.icon_wrap)
         self.icon_label.setPixmap(_icon_pixmap(icon, 40))
         self.icon_label.setFixedSize(40, 40)
         self.icon_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        icon_wrap_layout.addWidget(self.icon_label, 0, Qt.AlignCenter)
 
         self.title_label = QLabel(title)
         self.title_label.setObjectName("homeCardTitle")
@@ -98,12 +107,29 @@ class HomeCard(QWidget):
         self.subtitle_label = QLabel(subtitle)
         self.subtitle_label.setObjectName("homeCardSubtitle")
         self.subtitle_label.setWordWrap(True)
+        self.subtitle_label.setMinimumHeight(38)
         self.subtitle_label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
-        layout.addWidget(self.icon_label, 0, Qt.AlignLeft)
+        layout.addWidget(self.icon_wrap, 0, Qt.AlignLeft)
         layout.addWidget(self.title_label)
         layout.addWidget(self.subtitle_label)
         layout.addStretch(1)
+        self._init_shadow()
+
+    def _init_shadow(self):
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setBlurRadius(16)
+        self._shadow.setOffset(0, 2)
+        self._shadow.setColor(QColor(15, 23, 42, 40))
+        self.setGraphicsEffect(self._shadow)
+
+        self._shadow_blur_anim = QPropertyAnimation(self._shadow, b"blurRadius", self)
+        self._shadow_blur_anim.setDuration(170)
+        self._shadow_blur_anim.setEasingCurve(QEasingCurve.OutCubic)
+
+        self._shadow_offset_anim = QPropertyAnimation(self._shadow, b"offset", self)
+        self._shadow_offset_anim.setDuration(170)
+        self._shadow_offset_anim.setEasingCurve(QEasingCurve.OutCubic)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -121,6 +147,30 @@ class HomeCard(QWidget):
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()
+
+    def enterEvent(self, event):
+        self._shadow_blur_anim.stop()
+        self._shadow_blur_anim.setStartValue(self._shadow.blurRadius())
+        self._shadow_blur_anim.setEndValue(28)
+        self._shadow_blur_anim.start()
+
+        self._shadow_offset_anim.stop()
+        self._shadow_offset_anim.setStartValue(self._shadow.offset())
+        self._shadow_offset_anim.setEndValue(QPointF(0, 7))
+        self._shadow_offset_anim.start()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._shadow_blur_anim.stop()
+        self._shadow_blur_anim.setStartValue(self._shadow.blurRadius())
+        self._shadow_blur_anim.setEndValue(16)
+        self._shadow_blur_anim.start()
+
+        self._shadow_offset_anim.stop()
+        self._shadow_offset_anim.setStartValue(self._shadow.offset())
+        self._shadow_offset_anim.setEndValue(QPointF(0, 2))
+        self._shadow_offset_anim.start()
+        super().leaveEvent(event)
 
 
 class HoverGroupBox(QGroupBox):
@@ -186,14 +236,39 @@ class HomeInterface(QWidget):
     def _init_ui(self):
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(18)
+        root.setSpacing(16)
 
         title = QLabel("OMR 홈")
         title.setObjectName("homeTitle")
+        title.setContentsMargins(2, 0, 0, 0)
+
+        hero = QWidget()
+        hero.setObjectName("homeHero")
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(22, 18, 22, 18)
+        hero_layout.setSpacing(10)
+
+        hero_title = QLabel("스마트 OMR 작업공간")
+        hero_title.setObjectName("homeHeroTitle")
+        hero_sub = QLabel("판독, 오류검토, 통계를 하나의 흐름으로 빠르게 처리합니다.")
+        hero_sub.setObjectName("homeHeroSubtitle")
+        hero_sub.setWordWrap(True)
+
+        chip_row = QHBoxLayout()
+        chip_row.setSpacing(8)
+        for chip_text in ("실시간 판독", "배치 처리", "통계 대시보드"):
+            chip = QLabel(chip_text)
+            chip.setObjectName("homeHeroChip")
+            chip_row.addWidget(chip, 0, Qt.AlignLeft)
+        chip_row.addStretch(1)
+
+        hero_layout.addWidget(hero_title)
+        hero_layout.addWidget(hero_sub)
+        hero_layout.addLayout(chip_row)
 
         grid = QGridLayout()
-        grid.setHorizontalSpacing(18)
-        grid.setVerticalSpacing(18)
+        grid.setHorizontalSpacing(14)
+        grid.setVerticalSpacing(14)
 
         self.card_file = HomeCard(
             "파일 설정",
@@ -227,6 +302,16 @@ class HomeInterface(QWidget):
             _icon("DOCUMENT"),
         )
 
+        for card in (
+            self.card_file,
+            self.card_coord,
+            self.card_env,
+            self.card_exam,
+            self.card_church,
+            self.card_rebuild,
+        ):
+            card.setMinimumHeight(170)
+
         self.card_file.clicked.connect(self._on_file_settings_clicked)
         self.card_coord.clicked.connect(self._on_coord_settings_clicked)
         self.card_env.clicked.connect(self._on_env_settings_clicked)
@@ -240,21 +325,60 @@ class HomeInterface(QWidget):
         grid.addWidget(self.card_exam, 1, 0)
         grid.addWidget(self.card_church, 1, 1)
         grid.addWidget(self.card_rebuild, 1, 2)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
 
         root.addWidget(title)
+        root.addWidget(hero)
         root.addLayout(grid)
         root.addStretch(1)
 
         self.setStyleSheet(
-            "#homeTitle { font-size: 26px; font-weight: 600; }"
-            "#homeCard { background: #FFFFFF; "
-            "border: 1px solid #DDE3EA; border-radius: 16px; }"
-            "#homeCard:hover { border-color: #2E6BD9; "
-            "background: #EBF2FF; }"
-            "#homeCard[selected=\"true\"] { border: 2px solid #2E6BD9; "
-            "background: #E3EEFF; }"
-            "#homeCardTitle { font-size: 18px; font-weight: 600; }"
-            "#homeCardSubtitle { color: #666; }"
+            "#homeInterface {"
+            "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #F4F8FF, stop:0.6 #F7FAFF, stop:1 #FFFFFF);"
+            "}"
+            "#homeTitle { font-size: 28px; font-weight: 700; color: #0F172A; }"
+            "#homeHero {"
+            "  background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFFFFF, stop:1 #EAF2FF);"
+            "  border: 1px solid #D7E3F5;"
+            "  border-radius: 20px;"
+            "}"
+            "#homeHeroTitle { font-size: 24px; font-weight: 700; color: #0F172A; }"
+            "#homeHeroSubtitle { font-size: 13px; color: #334155; }"
+            "#homeHeroChip {"
+            "  background: #FFFFFF;"
+            "  border: 1px solid #CFE0FF;"
+            "  border-radius: 11px;"
+            "  padding: 4px 10px;"
+            "  color: #1D4ED8;"
+            "  font-size: 12px;"
+            "  font-weight: 600;"
+            "}"
+            "#homeCard {"
+            "  background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFFFFF, stop:1 #F8FBFF);"
+            "  border: 1px solid #D8E3F2;"
+            "  border-radius: 18px;"
+            "}"
+            "#homeCard:hover {"
+            "  border-color: #2E6BD9;"
+            "  background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFFFFF, stop:1 #EAF2FF);"
+            "}"
+            "#homeCard[selected='true'] {"
+            "  border: 2px solid #2E6BD9;"
+            "  background: #E3EEFF;"
+            "}"
+            "#homeCardIconWrap {"
+            "  background: #F2F7FF;"
+            "  border: 1px solid #DCE8FC;"
+            "  border-radius: 12px;"
+            "  min-width: 48px;"
+            "  max-width: 48px;"
+            "  min-height: 48px;"
+            "  max-height: 48px;"
+            "}"
+            "#homeCardTitle { font-size: 18px; font-weight: 700; color: #111827; }"
+            "#homeCardSubtitle { color: #4B5563; font-size: 13px; }"
         )
 
     def _emit_env_menu(self):
@@ -297,7 +421,6 @@ class HomeInterface(QWidget):
     def _on_rebuild_clicked(self):
         self.select_rebuild()
         self.open_rebuild_results.emit()
-
 
 class ScanInterface(QWidget):
     def __init__(self, parent=None):
@@ -536,6 +659,12 @@ class SettingsInterface(QWidget):
     global_offset_x_changed = Signal(int)
     global_offset_y_changed = Signal(int)
     partial_offset_changed = Signal(str, str, int)
+    omr_marker_threshold_changed = Signal(int)
+    omr_block_size_changed = Signal(int)
+    omr_c_changed = Signal(int)
+    omr_pixel_ratio_changed = Signal(float)
+    omr_red_cutoff_changed = Signal(int)
+    omr_open_kernel_changed = Signal(int)
     log_level_changed = Signal(str)
     locale_changed = Signal(str)
 
@@ -543,8 +672,12 @@ class SettingsInterface(QWidget):
         super().__init__(parent)
         self.setObjectName("settingsInterface")
         self._settings = QSettings("OMR", "OMRProject")
+        self._db = DBManager()
+        self._current_db_path = None
+        self._loading_omr_settings = False
         self._init_ui()
         self._load_settings()
+        self.refresh_omr_settings()
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -560,16 +693,6 @@ class SettingsInterface(QWidget):
         self.chk_auto_open = QCheckBox("마지막 DB 자동 열기")
         self.chk_auto_open.toggled.connect(self._on_auto_open_changed)
         startup_layout.addWidget(self.chk_auto_open)
-
-        # 테마 설정
-        theme_group = HoverGroupBox("테마")
-        theme_layout = QVBoxLayout(theme_group)
-        self.chk_dark = QCheckBox("다크 모드")
-        self.chk_dark.toggled.connect(self._on_toggle_dark)
-        self.chk_dark.setChecked(False)
-        self.chk_dark.setEnabled(False)
-        self.chk_dark.setToolTip("Global White Mode가 활성화되어 다크 모드를 사용할 수 없습니다.")
-        theme_layout.addWidget(self.chk_dark)
 
         # 글자 크기
         font_group = HoverGroupBox("글자 크기")
@@ -663,6 +786,187 @@ class SettingsInterface(QWidget):
         scan_layout.addWidget(partial_group)
         scan_layout.addLayout(dpi_row)
 
+        self.omr_tuning_group = HoverGroupBox("OMR 기표 인식 튜닝 (프로젝트 DB)")
+        self.omr_tuning_group.setObjectName("omrTuningGroup")
+        omr_layout = QVBoxLayout(self.omr_tuning_group)
+        omr_layout.setContentsMargins(14, 18, 14, 12)
+        omr_layout.setSpacing(10)
+
+        self.lbl_omr_tuning_header = QLabel("답안 인식 및 전처리 튜닝")
+        self.lbl_omr_tuning_header.setObjectName("omrTuningHeader")
+        self.lbl_omr_tuning_desc = QLabel(
+            "폼 JSON 값을 먼저 불러오고, 여기서 변경한 값은 프로젝트 DB에 저장되어 폼 기본값을 덮어씁니다."
+        )
+        self.lbl_omr_tuning_desc.setObjectName("omrTuningDesc")
+        self.lbl_omr_tuning_desc.setWordWrap(True)
+
+        tip_marker_threshold = (
+            "마커 임계값 (사이드/상단 마커 검출 전용)\n"
+            "- 마커 윤곽 검출용 그레이스케일 threshold에 사용됩니다\n"
+            "- 답안 버블 픽셀 카운트 기준을 직접 조절하는 값은 아닙니다\n"
+            "- 기본값: 120 (프로젝트 fallback)\n"
+            "- 권장값: 120~150 (마커 누락/노이즈 상황에 따라)\n"
+            "- 노이즈가 마커로 오검출되면 올리고, 마커를 놓치면 낮춰보세요"
+        )
+        tip_block_size = (
+            "적응형 임계값 블록 크기 (홀수)\n"
+            "- 값이 클수록 로컬 threshold 계산 창이 넓어집니다\n"
+            "- 짝수 입력 시 내부에서 홀수로 보정됩니다\n"
+            "- 기본값: 15\n"
+            "- 권장값: 11~19 (처음은 15 권장)"
+        )
+        tip_c = (
+            "적응형 임계값 C 값\n"
+            "- C를 낮추면 연한 마킹이 더 잘 살아남습니다\n"
+            "- C를 높이면 노이즈는 줄지만 연한 마킹을 놓칠 수 있습니다\n"
+            "- 기본값: 7\n"
+            "- 권장값: 3~5 (연한 연필), 7~9 (노이즈 많은 스캔)"
+        )
+        tip_red_cutoff = (
+            "적응형 임계값 이전 Red 채널 컷오프\n"
+            "- 이 값보다 밝은 픽셀은 먼저 흰색으로 강제 처리됩니다\n"
+            "- 값을 높일수록 연한 연필/펜 마킹이 더 보존됩니다\n"
+            "- 기본값: 180\n"
+            "- 권장값: 160~190 (연한 마킹이면 180부터 시작)"
+        )
+        tip_open_kernel = (
+            "이진화 이후 morphology open 커널\n"
+            "- 적응형 threshold 이후 작은 노이즈 점을 제거합니다\n"
+            "- 값이 크면 가늘거나 연한 마킹이 지워질 수 있습니다\n"
+            "- 기본값: 3\n"
+            "- 권장값: 1 (연한 마킹), 3 (균형)"
+        )
+        tip_pixel_ratio = (
+            "ROI 채움 비율 임계값 (문항/수험정보 판독)\n"
+            "- 채워진 픽셀 비율이 이 값 이상이면 기표로 판정합니다\n"
+            "- 코드 기본 fallback: 0.05\n"
+            "- 권장값: 0.04~0.06 (연한 마킹은 낮게)\n"
+            "- 폼 JSON에 question_layout.mark_threshold가 있으면 문항 영역은 그 값을 우선 사용할 수 있습니다"
+        )
+
+        self.spin_omr_marker_threshold = QSpinBox()
+        self.spin_omr_marker_threshold.setRange(0, 255)
+        self.spin_omr_marker_threshold.setSingleStep(5)
+        self.spin_omr_marker_threshold.setToolTip(tip_marker_threshold)
+        self.spin_omr_marker_threshold.valueChanged.connect(self._on_omr_marker_threshold_changed)
+        self.spin_omr_marker_threshold.setMinimumWidth(132)
+
+        self.spin_omr_block_size = QSpinBox()
+        self.spin_omr_block_size.setRange(3, 255)
+        self.spin_omr_block_size.setSingleStep(2)
+        self.spin_omr_block_size.setToolTip(tip_block_size)
+        self.spin_omr_block_size.valueChanged.connect(self._on_omr_block_size_changed)
+        self.spin_omr_block_size.setMinimumWidth(132)
+
+        self.spin_omr_c = QSpinBox()
+        self.spin_omr_c.setRange(0, 30)
+        self.spin_omr_c.setSingleStep(1)
+        self.spin_omr_c.setToolTip(tip_c)
+        self.spin_omr_c.valueChanged.connect(self._on_omr_c_changed)
+        self.spin_omr_c.setMinimumWidth(132)
+
+        self.spin_omr_red_cutoff = QSpinBox()
+        self.spin_omr_red_cutoff.setRange(0, 255)
+        self.spin_omr_red_cutoff.setSingleStep(5)
+        self.spin_omr_red_cutoff.setToolTip(tip_red_cutoff)
+        self.spin_omr_red_cutoff.valueChanged.connect(self._on_omr_red_cutoff_changed)
+        self.spin_omr_red_cutoff.setMinimumWidth(132)
+
+        self.spin_omr_open_kernel = QSpinBox()
+        self.spin_omr_open_kernel.setRange(1, 31)
+        self.spin_omr_open_kernel.setSingleStep(2)
+        self.spin_omr_open_kernel.setToolTip(tip_open_kernel)
+        self.spin_omr_open_kernel.valueChanged.connect(self._on_omr_open_kernel_changed)
+        self.spin_omr_open_kernel.setMinimumWidth(132)
+
+        self.spin_omr_pixel_ratio = QDoubleSpinBox()
+        self.spin_omr_pixel_ratio.setRange(0.0, 1.0)
+        self.spin_omr_pixel_ratio.setDecimals(3)
+        self.spin_omr_pixel_ratio.setSingleStep(0.005)
+        self.spin_omr_pixel_ratio.setToolTip(tip_pixel_ratio)
+        self.spin_omr_pixel_ratio.valueChanged.connect(self._on_omr_pixel_ratio_changed)
+        self.spin_omr_pixel_ratio.setMinimumWidth(132)
+
+        def _mk_omr_label(text: str, tip: str) -> QLabel:
+            lb = QLabel(text)
+            lb.setObjectName("omrFieldLabel")
+            lb.setToolTip(tip)
+            return lb
+
+        def _mk_omr_field_card(title: str, tip: str, editor: QWidget, helper_text: str) -> QWidget:
+            card = QWidget()
+            card.setObjectName("omrFieldCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 8, 10, 8)
+            card_layout.setSpacing(4)
+            title_label = _mk_omr_label(title, tip)
+            helper_label = QLabel(helper_text)
+            helper_label.setObjectName("omrFieldHint")
+            helper_label.setWordWrap(True)
+            helper_label.setToolTip(tip)
+            card_layout.addWidget(title_label)
+            card_layout.addWidget(helper_label)
+            card_layout.addWidget(editor)
+            return card
+
+        omr_header_panel = QWidget()
+        omr_header_panel.setObjectName("omrHeaderPanel")
+        omr_header_layout = QVBoxLayout(omr_header_panel)
+        omr_header_layout.setContentsMargins(10, 8, 10, 8)
+        omr_header_layout.setSpacing(3)
+        omr_header_layout.addWidget(self.lbl_omr_tuning_header)
+        omr_header_layout.addWidget(self.lbl_omr_tuning_desc)
+        omr_layout.addWidget(omr_header_panel)
+
+        self.omr_fields_panel = QWidget()
+        self.omr_fields_panel.setObjectName("omrFieldsPanel")
+        omr_fields_layout = QGridLayout(self.omr_fields_panel)
+        omr_fields_layout.setContentsMargins(0, 0, 0, 0)
+        omr_fields_layout.setHorizontalSpacing(8)
+        omr_fields_layout.setVerticalSpacing(8)
+        for col in range(3):
+            omr_fields_layout.setColumnStretch(col, 1)
+
+        omr_fields_layout.addWidget(
+            _mk_omr_field_card("마커 임계값", tip_marker_threshold, self.spin_omr_marker_threshold, "마커 검출 전용"),
+            0, 0
+        )
+        omr_fields_layout.addWidget(
+            _mk_omr_field_card("블록 크기", tip_block_size, self.spin_omr_block_size, "적응형 threshold 윈도우"),
+            0, 1
+        )
+        omr_fields_layout.addWidget(
+            _mk_omr_field_card("C 값", tip_c, self.spin_omr_c, "연한 마킹 민감도"),
+            0, 2
+        )
+        omr_fields_layout.addWidget(
+            _mk_omr_field_card("Red Cutoff", tip_red_cutoff, self.spin_omr_red_cutoff, "전처리 백색화 컷오프"),
+            1, 0
+        )
+        omr_fields_layout.addWidget(
+            _mk_omr_field_card("Open Kernel", tip_open_kernel, self.spin_omr_open_kernel, "노이즈 제거 강도"),
+            1, 1
+        )
+        omr_fields_layout.addWidget(
+            _mk_omr_field_card("Pixel Ratio", tip_pixel_ratio, self.spin_omr_pixel_ratio, "답안/필드 채움 비율 기준"),
+            1, 2
+        )
+        omr_layout.addWidget(self.omr_fields_panel)
+
+        self.lbl_omr_precedence = QLabel(
+            "우선순위: 폼 JSON 기본값 -> 프로젝트 DB override. 변경값은 DB에 저장되고 현재 파이프라인에도 즉시 반영됩니다(다음 분석/스캔 호출부터)."
+        )
+        self.lbl_omr_precedence.setObjectName("omrTuningNote")
+        self.lbl_omr_precedence.setWordWrap(True)
+        omr_layout.addWidget(self.lbl_omr_precedence)
+
+        self.lbl_omr_tuning_info = QLabel("프로젝트 DB를 선택하면 OMR 튜닝을 편집할 수 있습니다.")
+        self.lbl_omr_tuning_info.setObjectName("omrTuningStatus")
+        self.lbl_omr_tuning_info.setWordWrap(True)
+        omr_layout.addWidget(self.lbl_omr_tuning_info)
+
+        scan_layout.addWidget(self.omr_tuning_group)
+
         # 디버그/로그
         debug_group = HoverGroupBox("디버그/로그")
         debug_layout = QVBoxLayout(debug_group)
@@ -688,7 +992,6 @@ class SettingsInterface(QWidget):
 
         root.addWidget(title)
         root.addWidget(startup_group)
-        root.addWidget(theme_group)
         root.addWidget(font_group)
         root.addWidget(scan_group)
         root.addWidget(debug_group)
@@ -696,16 +999,97 @@ class SettingsInterface(QWidget):
         root.addStretch(1)
 
         self.setStyleSheet(
-            "#settingsTitle { font-size: 22px; font-weight: 600; }"
-            "QGroupBox { background: #FFFFFF; border: 1px solid #E1E7EE;"
-            " border-radius: 12px; padding: 10px; }"
-            "QGroupBox::title { subcontrol-origin: margin; left: 10px; top: -2px; padding: 0 6px; }"
+            "#settingsInterface { background: #F6F8FC; }"
+            "#settingsTitle { font-size: 22px; font-weight: 700; color: #0F172A; }"
+            "#settingsInterface QGroupBox {"
+            " background: #FFFFFF;"
+            " border: 1px solid #E1E7EE;"
+            " border-radius: 12px;"
+            " margin-top: 10px;"
+            " padding: 14px 10px 10px 10px;"
+            "}"
+            "#settingsInterface QGroupBox::title {"
+            " subcontrol-origin: margin;"
+            " subcontrol-position: top left;"
+            " left: 10px;"
+            " top: 1px;"
+            " padding: 0 6px;"
+            " color: #334155;"
+            " font-weight: 600;"
+            "}"
+            "#settingsInterface QCheckBox { color: #1F2937; spacing: 6px; }"
+            "#settingsInterface QLabel { color: #1F2937; }"
+            "#settingsInterface QSpinBox, #settingsInterface QDoubleSpinBox, #settingsInterface QComboBox {"
+            " background: #FFFFFF;"
+            " border: 1px solid #D8E0EC;"
+            " border-radius: 8px;"
+            " min-height: 28px;"
+            " padding: 2px 8px;"
+            " selection-background-color: #DCEAFE;"
+            "}"
+            "#settingsInterface QSpinBox:hover, #settingsInterface QDoubleSpinBox:hover, #settingsInterface QComboBox:hover {"
+            " border-color: #B8CAE7;"
+            "}"
+            "#settingsInterface QSpinBox:focus, #settingsInterface QDoubleSpinBox:focus, #settingsInterface QComboBox:focus {"
+            " border: 1px solid #2E6BD9;"
+            "}"
+            "#settingsInterface QSlider::groove:horizontal {"
+            " height: 4px;"
+            " background: #DCE4F1;"
+            " border-radius: 2px;"
+            "}"
+            "#settingsInterface QSlider::sub-page:horizontal {"
+            " background: #2E6BD9;"
+            " border-radius: 2px;"
+            "}"
+            "#settingsInterface QSlider::handle:horizontal {"
+            " width: 12px;"
+            " margin: -5px 0;"
+            " border-radius: 6px;"
+            " background: #2E6BD9;"
+            " border: 1px solid #1F5FCB;"
+            "}"
+            "#omrTuningGroup {"
+            " background: qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #F6FAFF, stop:1 #FDFEFF);"
+            " border: 1px solid #D7E4FB;"
+            " border-radius: 14px;"
+            " padding-top: 18px;"
+            "}"
+            "#omrTuningHeader { font-size: 13px; font-weight: 700; color: #1E3A8A; }"
+            "#omrTuningDesc { font-size: 11px; color: #566273; }"
+            "#omrHeaderPanel {"
+            " background: rgba(255,255,255,0.88);"
+            " border: 1px solid #E2ECFB;"
+            " border-radius: 10px;"
+            "}"
+            "#omrFieldsPanel { background: transparent; border: none; }"
+            "#omrFieldCard {"
+            " background: rgba(255,255,255,0.96);"
+            " border: 1px solid #E4ECF8;"
+            " border-radius: 10px;"
+            "}"
+            "#omrTuningGroup QLabel#omrFieldLabel { font-weight: 600; color: #334155; }"
+            "#omrFieldHint { font-size: 10px; color: #718096; }"
+            "#omrTuningNote {"
+            " background: #FFFFFF;"
+            " border: 1px solid #DCE7FB;"
+            " border-radius: 8px;"
+            " padding: 6px 8px;"
+            " color: #315CA8;"
+            "}"
+            "#omrTuningStatus { font-size: 11px; color: #1E6BB8; }"
+            "QToolTip {"
+            " background: #FFFFFF;"
+            " color: #0F172A;"
+            " border: 1px solid #CBD8EC;"
+            " padding: 8px 10px;"
+            " border-radius: 8px;"
+            "}"
         )
 
     def _load_settings(self):
         self.chk_auto_open.setChecked(self._settings.value("startup/auto_open", False, type=bool))
         self._settings.setValue("theme/dark", False)
-        self.chk_dark.setChecked(False)
 
         font_size = self._settings.value("font/size", 10, type=int)
         self.slider_font.setValue(font_size)
@@ -738,6 +1122,125 @@ class SettingsInterface(QWidget):
         if idx >= 0:
             self.cbo_locale.setCurrentIndex(idx)
 
+    @staticmethod
+    def _parse_omr_int(raw, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+        try:
+            value = int(float(raw))
+        except Exception:
+            value = int(default)
+        if min_value is not None:
+            value = max(int(min_value), value)
+        if max_value is not None:
+            value = min(int(max_value), value)
+        return int(value)
+
+    @staticmethod
+    def _parse_omr_float(raw, default: float, min_value: float | None = None, max_value: float | None = None) -> float:
+        try:
+            value = float(raw)
+        except Exception:
+            value = float(default)
+        if min_value is not None:
+            value = max(float(min_value), value)
+        if max_value is not None:
+            value = min(float(max_value), value)
+        return float(value)
+
+    def _set_omr_tuning_enabled(self, enabled: bool):
+        if hasattr(self, "omr_tuning_group"):
+            self.omr_tuning_group.setEnabled(bool(enabled))
+
+    def set_project_db(self, db_path: str | None, pipeline=None):
+        self._current_db_path = db_path if db_path else None
+        self.refresh_omr_settings(pipeline=pipeline)
+
+    def refresh_omr_settings(self, pipeline=None):
+        defaults = {
+            "marker_threshold": 120,
+            "block_size": 15,
+            "c": 7,
+            "pixel_ratio": 0.05,
+            "red_cutoff": 180,
+            "open_kernel": 3,
+        }
+
+        engine = getattr(pipeline, "engine", None) if pipeline is not None else None
+        if engine is not None:
+            defaults["marker_threshold"] = int(getattr(engine, "marker_thresh", defaults["marker_threshold"]))
+            defaults["block_size"] = int(getattr(engine, "block_size", defaults["block_size"]))
+            defaults["c"] = int(getattr(engine, "C", defaults["c"]))
+            defaults["pixel_ratio"] = float(getattr(engine, "pixel_threshold", defaults["pixel_ratio"]))
+            defaults["red_cutoff"] = int(
+                getattr(
+                    engine,
+                    "red_cutoff",
+                    getattr(getattr(engine, "image_processor", None), "red_cutoff", defaults["red_cutoff"]),
+                )
+            )
+            defaults["open_kernel"] = int(
+                getattr(
+                    engine,
+                    "open_kernel",
+                    getattr(getattr(engine, "image_processor", None), "open_kernel", defaults["open_kernel"]),
+                )
+            )
+
+        has_db = bool(self._current_db_path and os.path.exists(self._current_db_path))
+        self._loading_omr_settings = True
+        try:
+            self.spin_omr_marker_threshold.setValue(self._parse_omr_int(defaults["marker_threshold"], 120, 0, 255))
+            self.spin_omr_block_size.setValue(self._parse_omr_int(defaults["block_size"], 15, 3, 255))
+            self.spin_omr_c.setValue(self._parse_omr_int(defaults["c"], 7, 0, 30))
+            self.spin_omr_pixel_ratio.setValue(self._parse_omr_float(defaults["pixel_ratio"], 0.05, 0.0, 1.0))
+            self.spin_omr_red_cutoff.setValue(self._parse_omr_int(defaults["red_cutoff"], 180, 0, 255))
+            self.spin_omr_open_kernel.setValue(self._parse_omr_int(defaults["open_kernel"], 3, 1, 31))
+        finally:
+            self._loading_omr_settings = False
+
+        self._set_omr_tuning_enabled(has_db)
+        if hasattr(self, "lbl_omr_tuning_info"):
+            if has_db:
+                self.lbl_omr_tuning_info.setText(
+                    "준비됨. 값은 현재 프로젝트 DB에 저장되며, 현재 파이프라인에도 즉시 반영됩니다(다음 스캔/분석 호출부터)."
+                )
+            else:
+                self.lbl_omr_tuning_info.setText("프로젝트 DB를 먼저 선택하면 OMR 튜닝 항목이 활성화됩니다.")
+
+    def _save_omr_db_value(self, key: str, value) -> bool:
+        if self._loading_omr_settings:
+            return False
+        if not self._current_db_path or not os.path.exists(self._current_db_path):
+            return False
+        try:
+            self._db.save_setting(self._current_db_path, key, value)
+            return True
+        except Exception:
+            return False
+
+    def _on_omr_marker_threshold_changed(self, value: int):
+        if self._save_omr_db_value("omr_threshold", int(value)):
+            self.omr_marker_threshold_changed.emit(int(value))
+
+    def _on_omr_block_size_changed(self, value: int):
+        if self._save_omr_db_value("omr_block_size", int(value)):
+            self.omr_block_size_changed.emit(int(value))
+
+    def _on_omr_c_changed(self, value: int):
+        if self._save_omr_db_value("omr_c", int(value)):
+            self.omr_c_changed.emit(int(value))
+
+    def _on_omr_pixel_ratio_changed(self, value: float):
+        if self._save_omr_db_value("omr_pixel_ratio", float(value)):
+            self.omr_pixel_ratio_changed.emit(float(value))
+
+    def _on_omr_red_cutoff_changed(self, value: int):
+        if self._save_omr_db_value("omr_red_cutoff", int(value)):
+            self.omr_red_cutoff_changed.emit(int(value))
+
+    def _on_omr_open_kernel_changed(self, value: int):
+        if self._save_omr_db_value("omr_open_kernel", int(value)):
+            self.omr_open_kernel_changed.emit(int(value))
+
     def _on_auto_open_changed(self, checked: bool):
         self._settings.setValue("startup/auto_open", checked)
         self.auto_open_changed.emit(checked)
@@ -747,10 +1250,6 @@ class SettingsInterface(QWidget):
             setTheme(Theme.LIGHT)
         except Exception:
             pass
-        if checked:
-            self.chk_dark.blockSignals(True)
-            self.chk_dark.setChecked(False)
-            self.chk_dark.blockSignals(False)
         self._settings.setValue("theme/dark", False)
 
     def _on_font_size_changed(self, size: int):
@@ -957,6 +1456,13 @@ class OMRScannerApp(QMainWindow):
             self.navigationInterface.setCurrentItem(interface.objectName())
         except Exception:
             pass
+        if interface is getattr(self, "settings_interface", None):
+            try:
+                self.settings_interface.refresh_omr_settings(
+                    getattr(self.scan_interface.scanner_view, "pipeline", None)
+                )
+            except Exception:
+                pass
         if interface is getattr(self, "scan_interface", None):
             self._fix_scanner_grid_after_layout_change()
 
@@ -1032,6 +1538,12 @@ class OMRScannerApp(QMainWindow):
         self.settings_interface.global_offset_x_changed.connect(self._apply_global_offset_x)
         self.settings_interface.global_offset_y_changed.connect(self._apply_global_offset_y)
         self.settings_interface.partial_offset_changed.connect(self._apply_partial_offset)
+        self.settings_interface.omr_marker_threshold_changed.connect(self._apply_omr_marker_threshold)
+        self.settings_interface.omr_block_size_changed.connect(self._apply_omr_block_size)
+        self.settings_interface.omr_c_changed.connect(self._apply_omr_c)
+        self.settings_interface.omr_pixel_ratio_changed.connect(self._apply_omr_pixel_ratio)
+        self.settings_interface.omr_red_cutoff_changed.connect(self._apply_omr_red_cutoff)
+        self.settings_interface.omr_open_kernel_changed.connect(self._apply_omr_open_kernel)
         self.settings_interface.log_level_changed.connect(self._apply_log_level)
 
     def open_file_setting(self):
@@ -1046,6 +1558,13 @@ class OMRScannerApp(QMainWindow):
         self.results_exam_interface.set_db_path(path)
         self.results_church_interface.set_db_path(path)
         self.results_rebuild_interface.set_db_path(path)
+        try:
+            self.settings_interface.set_project_db(
+                path,
+                getattr(self.scan_interface.scanner_view, "pipeline", None),
+            )
+        except Exception:
+            pass
         self._settings.setValue("startup/last_db_path", path)
 
     def get_current_db(self):
@@ -1066,13 +1585,16 @@ class OMRScannerApp(QMainWindow):
 
     def open_mark_setting(self):
         db_path = self.get_current_db()
-        if db_path:
-            dlg = MarkSettingsDialog(self, db_path)
-            if dlg.exec_():
-                try:
-                    self.scan_interface.scanner_view.on_form_changed()
-                except Exception:
-                    pass
+        if not db_path:
+            return
+        try:
+            self.settings_interface.set_project_db(
+                db_path,
+                getattr(self.scan_interface.scanner_view, "pipeline", None),
+            )
+        except Exception:
+            pass
+        self.switchTo(self.settings_interface)
 
     def open_path_setting(self):
         db_path = self.get_current_db()
@@ -1281,6 +1803,36 @@ class OMRScannerApp(QMainWindow):
         if hasattr(view, "pipeline"):
             kwargs = {f"{sec}_offset_{ax}": int(value)}
             view.pipeline.engine.configure(**kwargs)
+
+    def _apply_omr_marker_threshold(self, value: int):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.engine.configure(marker_thresh=int(value))
+
+    def _apply_omr_block_size(self, value: int):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.engine.configure(block_size=int(value))
+
+    def _apply_omr_c(self, value: int):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.engine.configure(C=int(value))
+
+    def _apply_omr_pixel_ratio(self, value: float):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.engine.configure(pixel_ratio=float(value))
+
+    def _apply_omr_red_cutoff(self, value: int):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.engine.configure(red_cutoff=int(value))
+
+    def _apply_omr_open_kernel(self, value: int):
+        view = self.scan_interface.scanner_view
+        if hasattr(view, "pipeline"):
+            view.pipeline.engine.configure(open_kernel=int(value))
 
     def _apply_log_level(self, level: str):
         import logging

@@ -93,6 +93,8 @@ class ScanPipeline:
                     # 전처리(adaptiveThreshold) 파라미터 (없으면 기본 유지)
                     block_size = omr.get("block_size")  # JSON에 없으면 None -> 기본 15 유지
                     C = self._parse_int_setting(omr.get("C", 7), 7, min_value=0, max_value=30)
+                    red_cutoff = self._parse_int_setting(omr.get("red_cutoff", 180), 180, min_value=0, max_value=255)
+                    open_kernel = self._parse_int_setting(omr.get("open_kernel", 3), 3, min_value=1, max_value=31)
 
                     # 마킹 판정 비율
                     pixel_ratio = self._parse_float_setting(omr.get("pixel_ratio", 0.05), 0.05, min_value=0.0, max_value=1.0)
@@ -108,11 +110,26 @@ class ScanPipeline:
                             min_value=0,
                             max_value=255,
                         )
+                        raw_block_size = self.db.get_setting(self.current_db_path, "omr_block_size", "")
+                        if str(raw_block_size).strip() != "":
+                            block_size = self._parse_int_setting(raw_block_size, block_size or 15, min_value=3, max_value=255)
                         C = self._parse_int_setting(
                             self.db.get_setting(self.current_db_path, "omr_c", "7"),
                             C,
                             min_value=0,
                             max_value=30,
+                        )
+                        red_cutoff = self._parse_int_setting(
+                            self.db.get_setting(self.current_db_path, "omr_red_cutoff", "180"),
+                            red_cutoff,
+                            min_value=0,
+                            max_value=255,
+                        )
+                        open_kernel = self._parse_int_setting(
+                            self.db.get_setting(self.current_db_path, "omr_open_kernel", "3"),
+                            open_kernel,
+                            min_value=1,
+                            max_value=31,
                         )
                         pixel_ratio = self._parse_float_setting(
                             self.db.get_setting(self.current_db_path, "omr_pixel_ratio", "0.05"),
@@ -145,6 +162,8 @@ class ScanPipeline:
                         pixel_ratio=pixel_ratio,
                         marker_thresh=marker_thresh,
                         C=C,
+                        red_cutoff=red_cutoff,
+                        open_kernel=open_kernel,
                         marker_detection=marker_detection,
                         exam_no_offset=exam_no_offset,
                         birth_offset=birth_offset,

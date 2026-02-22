@@ -19,6 +19,8 @@ class OMREngine:
 
         self.block_size = 15
         self.C = 7
+        self.red_cutoff = 180
+        self.open_kernel = 3
         self.pixel_threshold = 0.05
         self.marker_thresh = 215
         # Legacy alias for older code paths that still refer to threshold_value.
@@ -42,7 +44,12 @@ class OMREngine:
         self.questions_offset = 0.0
         self.marker_detection: Dict[str, Any] = {}
 
-        self.image_processor = ImageProcessor(block_size=self.block_size, c_value=self.C)
+        self.image_processor = ImageProcessor(
+            block_size=self.block_size,
+            c_value=self.C,
+            red_cutoff=self.red_cutoff,
+            open_kernel=self.open_kernel,
+        )
         self.geometry_manager = GeometryManager(width=self.width, height=self.height)
         self.marker_detector = MarkerDetector(marker_thresh=self.marker_thresh)
         self.scanner = OMRScanner(
@@ -61,6 +68,8 @@ class OMREngine:
         pixel_ratio: Optional[float] = None,
         marker_thresh: Optional[int] = None,
         C: Optional[int] = None,
+        red_cutoff: Optional[int] = None,
+        open_kernel: Optional[int] = None,
         global_offset_x: Optional[int] = None,
         global_offset_y: Optional[int] = None,
         exam_no_offset_x: Optional[int] = None,
@@ -124,6 +133,10 @@ class OMREngine:
             self.marker_thresh = int(marker_thresh)
         if C is not None:
             self.C = int(C)
+        if red_cutoff is not None:
+            self.red_cutoff = int(red_cutoff)
+        if open_kernel is not None:
+            self.open_kernel = int(open_kernel)
         if global_offset_x is not None:
             self.global_offset_x = int(global_offset_x)
         if global_offset_y is not None:
@@ -162,7 +175,12 @@ class OMREngine:
             self.marker_detection = dict(marker_detection)
         self.threshold_value = int(self.marker_thresh)
 
-        self.image_processor.configure(block_size=self.block_size, c_value=self.C)
+        self.image_processor.configure(
+            block_size=self.block_size,
+            c_value=self.C,
+            red_cutoff=self.red_cutoff,
+            open_kernel=self.open_kernel,
+        )
         self.marker_detector.configure(
             marker_thresh=self.marker_thresh,
             detection_config=self.marker_detection,

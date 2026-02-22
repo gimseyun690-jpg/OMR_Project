@@ -13,7 +13,7 @@
     "block_size": 15,
     "C": 7,
     "threshold": 120,
-    "pixel_ratio": 0.09
+    "pixel_ratio": 0.05
   },
   "marker_detection": {
     "spacing_rel_max_top_bottom": 2.2

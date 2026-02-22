@@ -148,6 +148,8 @@ class DemoWorker(QThread):
                 "pixel_ratio": float(getattr(engine, "pixel_threshold", 0.05)),
                 "marker_thresh": int(getattr(engine, "marker_thresh", 120)),
                 "C": int(getattr(engine, "C", 7)),
+                "red_cutoff": int(getattr(engine, "red_cutoff", 180)),
+                "open_kernel": int(getattr(engine, "open_kernel", 3)),
                 "global_offset_x": int(getattr(engine, "global_offset_x", 0)),
                 "global_offset_y": int(getattr(engine, "global_offset_y", 0)),
                 "exam_no_offset_x": int(getattr(engine, "exam_no_offset_x", 0)),
