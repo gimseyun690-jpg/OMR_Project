@@ -68,7 +68,9 @@ class BaseErrorCorrectionDialog(QDialog):
         self.zoom_factor = 1.0
         self._orig_pixmap = None
         self._warp_pixmap = None
+        self._filter_pixmap = None
         self._show_warped = True
+        self._show_recognition_filter = False
         self.progress_title_text = "오류 진행"
         self.progress_hint_text = "현재/전체"
 
@@ -196,8 +198,15 @@ class BaseErrorCorrectionDialog(QDialog):
         lbl_view_title.setObjectName("cardTitle")
         self.chk_show_warped = QCheckBox("정렬된 이미지 보기")
         self.chk_show_warped.setChecked(True)
+        self.chk_show_filter = QCheckBox("인식 필터 보기")
+        self.chk_show_filter.setChecked(False)
+        self.chk_show_filter.setToolTip(
+            "판독 계산에는 영향을 주지 않는 미리보기입니다.\n"
+            "원본 이미지에 적색 제거 + 이진화 전처리를 적용한 결과를 표시합니다."
+        )
         v_view.addWidget(lbl_view_title, 0, Qt.AlignLeft)
         v_view.addWidget(self.chk_show_warped)
+        v_view.addWidget(self.chk_show_filter)
         top_layout.addWidget(card_view)
 
         main_layout.addWidget(top_panel)
@@ -420,6 +429,7 @@ class BaseErrorCorrectionDialog(QDialog):
         self.btn_prev.clicked.connect(self.on_prev)
         self.btn_next.clicked.connect(self.on_next)
         self.chk_show_warped.toggled.connect(self._on_toggle_warped)
+        self.chk_show_filter.toggled.connect(self._on_toggle_recognition_filter)
         for idx, btn in enumerate(self.batch_buttons):
             btn.clicked.connect(lambda _checked=False, c=idx: self.batch_process(c))
 
@@ -611,7 +621,15 @@ class BaseErrorCorrectionDialog(QDialog):
             try:
                 if base_img is not None:
                     self._orig_pixmap = self._cv_to_pixmap(base_img)
+                    filter_img = self._build_recognition_filter_preview(base_img)
+                    self._filter_pixmap = self._cv_to_pixmap(filter_img) if filter_img is not None else None
+                else:
+                    self._filter_pixmap = None
                 self._warp_pixmap = self._cv_to_pixmap(self.image_cv) if self.image_cv is not None else None
+                has_filter = bool(self._filter_pixmap is not None and not self._filter_pixmap.isNull())
+                self.chk_show_filter.setEnabled(has_filter)
+                if (not has_filter) and self.chk_show_filter.isChecked():
+                    self.chk_show_filter.setChecked(False)
                 self._render_image()
             except Exception as e:
                 print(f"[ErrorCorrectionDialog] update_image failed: {e}")
@@ -635,12 +653,80 @@ class BaseErrorCorrectionDialog(QDialog):
             new_h = max(1, int(h * scale))
             img_cv = cv2.resize(img_cv, (new_w, new_h), interpolation=cv2.INTER_AREA)
             h, w = img_cv.shape[:2]
+        img_cv = np.ascontiguousarray(img_cv)
+        if len(img_cv.shape) == 2:
+            bytes_per_line = int(img_cv.strides[0])
+            if hasattr(QImage, "Format_Grayscale8"):
+                q_img = QImage(img_cv.data, w, h, bytes_per_line, QImage.Format_Grayscale8)
+                return QPixmap.fromImage(q_img.copy())
+            gray_rgb = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2RGB)
+            gray_rgb = np.ascontiguousarray(gray_rgb)
+            q_img = QImage(gray_rgb.data, w, h, int(gray_rgb.strides[0]), QImage.Format_RGB888)
+            return QPixmap.fromImage(q_img.copy())
+        if len(img_cv.shape) == 3 and img_cv.shape[2] == 4:
+            rgba_img = cv2.cvtColor(img_cv, cv2.COLOR_BGRA2RGBA)
+            rgba_img = np.ascontiguousarray(rgba_img)
+            q_img = QImage(rgba_img.data, w, h, int(rgba_img.strides[0]), QImage.Format_RGBA8888)
+            return QPixmap.fromImage(q_img.copy())
         rgb_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
         rgb_img = np.ascontiguousarray(rgb_img)
-        bytes_per_line = rgb_img.shape[1] * rgb_img.shape[2]
+        bytes_per_line = int(rgb_img.strides[0])
         q_img = QImage(rgb_img.data, w, h, bytes_per_line, QImage.Format_RGB888)
         q_img = q_img.copy()
         return QPixmap.fromImage(q_img)
+
+    def _get_filter_preview_params(self):
+        block_size = 15
+        c_value = 7
+        red_cutoff = 180
+        open_kernel = 3
+        try:
+            parent = self.parent()
+            pipeline = getattr(parent, "pipeline", None)
+            engine = getattr(pipeline, "engine", None) if pipeline is not None else None
+            if engine is not None:
+                block_size = int(getattr(engine, "block_size", block_size))
+                c_value = int(getattr(engine, "C", c_value))
+                red_cutoff = int(getattr(engine, "red_cutoff", red_cutoff))
+                open_kernel = int(getattr(engine, "open_kernel", open_kernel))
+        except Exception:
+            pass
+        if block_size % 2 == 0:
+            block_size += 1
+        block_size = max(3, block_size)
+        if open_kernel <= 0:
+            open_kernel = 1
+        if open_kernel % 2 == 0:
+            open_kernel += 1
+        open_kernel = max(1, open_kernel)
+        red_cutoff = int(np.clip(int(red_cutoff), 0, 255))
+        return block_size, c_value, red_cutoff, open_kernel
+
+    def _build_recognition_filter_preview(self, source_img):
+        if source_img is None or not hasattr(source_img, "shape"):
+            return None
+        try:
+            img = np.ascontiguousarray(source_img.copy())
+            block_size, c_value, red_cutoff, open_kernel = self._get_filter_preview_params()
+            if len(img.shape) == 3:
+                red_channel = img[:, :, 2].copy()
+                red_channel[red_channel > int(red_cutoff)] = 255
+                img_gray = red_channel
+            else:
+                img_gray = cv2.add(img, 30)
+            binary_img = cv2.adaptiveThreshold(
+                img_gray,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV,
+                int(block_size),
+                int(c_value),
+            )
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (int(open_kernel), int(open_kernel)))
+            return cv2.morphologyEx(binary_img, cv2.MORPH_OPEN, kernel, iterations=1)
+        except Exception as e:
+            print(f"[ErrorCorrectionDialog] filter preview build failed: {e}")
+            return None
 
     def _render_image(self):
         pixmap = self._get_active_pixmap()
@@ -685,12 +771,18 @@ class BaseErrorCorrectionDialog(QDialog):
         super().resizeEvent(event)
 
     def _get_active_pixmap(self):
+        if self._show_recognition_filter and self._filter_pixmap is not None:
+            return self._filter_pixmap
         if self._show_warped and self._warp_pixmap is not None:
             return self._warp_pixmap
         return self._orig_pixmap
 
     def _on_toggle_warped(self, checked):
         self._show_warped = bool(checked)
+        self._render_image()
+
+    def _on_toggle_recognition_filter(self, checked):
+        self._show_recognition_filter = bool(checked)
         self._render_image()
 
 

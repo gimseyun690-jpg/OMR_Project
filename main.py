@@ -2,8 +2,73 @@
 import sys
 import traceback
 import ctypes
+import struct
 
 STARTUP_LOG = os.path.join(os.path.dirname(__file__), "startup.log")
+CANONICAL_VENV_PY = r"D:\OMR_Project_envs\.venv64\Scripts\python.exe"
+
+
+def _same_path(a: str, b: str) -> bool:
+    try:
+        return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(os.path.normpath(str(b)))
+    except Exception:
+        return str(a) == str(b)
+
+
+def _format_dependency_error_message(exc: Exception) -> str:
+    current_py = str(sys.executable or "python")
+    current_pip_cmd = f'"{current_py}" -m pip install -r requirements.txt'
+    current_run_cmd = f'"{current_py}" main.py'
+    bitness = struct.calcsize("P") * 8
+    canonical_exists = os.path.isfile(CANONICAL_VENV_PY)
+    using_canonical = canonical_exists and _same_path(current_py, CANONICAL_VENV_PY)
+    exc_line = f"{type(exc).__name__}: {exc}".strip()
+
+    lines = [
+        "PySide2-Fluent-Widgets import failed.",
+        "",
+        f"Current Python ({bitness}-bit):",
+        current_py,
+        "",
+        "Note: pip package name = PySide2-Fluent-Widgets",
+        "Note: import module name = qfluentwidgets",
+        "",
+        f"Error: {exc_line}",
+        "",
+        "Reinstall in this interpreter:",
+        current_pip_cmd,
+    ]
+
+    if canonical_exists and not using_canonical:
+        lines.extend([
+            "",
+            "Run with the recommended 64-bit environment:",
+            f'"{CANONICAL_VENV_PY}" main.py',
+            "Reinstall in the recommended 64-bit environment:",
+            f'"{CANONICAL_VENV_PY}" -m pip install -r requirements.txt',
+        ])
+    elif using_canonical:
+        lines.extend([
+            "",
+            "You are already running in the standard 64-bit environment.",
+            "If it still fails, check startup.log and reinstall requirements.",
+        ])
+    else:
+        lines.extend([
+            "",
+            "Check the standard 64-bit environment path:",
+            CANONICAL_VENV_PY,
+        ])
+
+    lines.extend([
+        "",
+        "Current interpreter run command:",
+        current_run_cmd,
+        "",
+        "Detailed log: startup.log",
+    ])
+    return "\n".join(lines)
+
 
 
 def _log_startup(message: str):
@@ -61,17 +126,14 @@ _log_startup(
 try:
     _log_startup(f"[Startup] python={sys.executable}")
     import qfluentwidgets  # noqa: F401
-except Exception:
+except Exception as exc:
     _log_startup("[Fatal] qfluentwidgets import failed")
     _log_startup(traceback.format_exc())
     app = QApplication(sys.argv)
     QMessageBox.critical(
         None,
         "Dependency Error",
-        "PySide2-Fluent-Widgets import failed.\n\n"
-        "Check startup.log for details.\n"
-        "Run this command again if needed:\n"
-        "python -m pip install -r requirements.txt",
+        _format_dependency_error_message(exc),
     )
     sys.exit(1)
 
