@@ -630,6 +630,132 @@ class OMRScanner:
             return float(exp_w_b), float(exp_h_b)
         return float(exp_w_a), float(exp_h_a)
 
+    def _build_scan_geometry_data(
+        self,
+        work_img: Optional[np.ndarray],
+        markers: Sequence[Marker],
+        marker_location: str,
+        scale: float,
+        layout_config: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        loc = str(marker_location or "left").strip().lower()
+        if loc not in ("left", "right", "top", "bottom"):
+            loc = "left"
+        axis_key = "cx" if loc in ("top", "bottom") else "cy"
+        marker_axis = sorted(list(markers or []), key=lambda m: int(getattr(m, axis_key, 0)))
+
+        geom_scale_x, geom_scale_y = self._compute_global_scale_factors(
+            work_img,
+            marker_axis,
+            loc,
+            scale,
+            cfg=layout_config,
+        )
+
+        expected_w_scaled = 0.0
+        expected_h_scaled = 0.0
+        if work_img is not None:
+            expected_w_scaled, expected_h_scaled = self._resolve_scaled_layout_canvas(
+                layout_config,
+                img_w=int(work_img.shape[1]),
+                img_h=int(work_img.shape[0]),
+                base_scale=float(scale),
+            )
+
+        return {
+            "global_scale_x": float(geom_scale_x),
+            "global_scale_y": float(geom_scale_y),
+            "expected_w_scaled": float(expected_w_scaled),
+            "expected_h_scaled": float(expected_h_scaled),
+            "axis_key": str(axis_key),
+            "marker_axis": marker_axis,
+        }
+
+    def _prepare_scan_context(
+        self,
+        original_img: Optional[np.ndarray],
+        marker_location: str,
+        layout_config: Optional[Dict[str, Any]],
+        scale: float,
+    ) -> Dict[str, Any]:
+        context: Dict[str, Any] = {
+            "work_img": None,
+            "processed_img": None,
+            "debug_img": None,
+            "markers": [],
+            "marker_axis": [],
+            "axis_key": "cy",
+            "marker_location": str(marker_location or "").strip().lower(),
+            "geometry_data": {
+                "global_scale_x": float(scale if np.isfinite(float(scale)) and float(scale) > 0.0 else 1.0),
+                "global_scale_y": float(scale if np.isfinite(float(scale)) and float(scale) > 0.0 else 1.0),
+                "expected_w_scaled": 0.0,
+                "expected_h_scaled": 0.0,
+                "axis_key": "cy",
+                "marker_axis": [],
+            },
+            "deskew_applied": False,
+            "error_status": "",
+        }
+        if original_img is None:
+            context["error_status"] = "IMG_NONE"
+            return context
+
+        cfg = layout_config if isinstance(layout_config, dict) else {}
+        loc = str(marker_location or "").strip().lower()
+        use_marker_alignment = bool(loc)
+
+        base_img = original_img
+        markers: List[Marker] = []
+        deskew_applied = False
+
+        if use_marker_alignment:
+            base_img, markers = self.marker_detector.normalize_orientation(
+                original_img,
+                expected_location=loc,
+                min_count=3,
+            )
+            if base_img is None:
+                context["error_status"] = "IMG_NONE"
+                return context
+
+            base_img, markers, deskew_applied = self._apply_marker_deskew(
+                base_img,
+                markers,
+                marker_location=loc,
+                config=cfg,
+            )
+
+        work_img, processed_img = self.image_processor.preprocess(base_img)
+        if work_img is None or processed_img is None:
+            context["error_status"] = "PREPROCESS"
+            return context
+
+        effective_loc = loc if use_marker_alignment else "left"
+        geometry_data = self._build_scan_geometry_data(
+            work_img,
+            markers,
+            effective_loc,
+            scale,
+            cfg,
+        )
+
+        context.update(
+            {
+                "work_img": work_img,
+                "processed_img": processed_img,
+                "debug_img": work_img.copy(),
+                "markers": list(markers or []),
+                "marker_axis": list(geometry_data.get("marker_axis", [])),
+                "axis_key": str(geometry_data.get("axis_key", "cy")),
+                "marker_location": loc if use_marker_alignment else "",
+                "geometry_data": geometry_data,
+                "deskew_applied": bool(deskew_applied),
+                "error_status": "",
+            }
+        )
+        return context
+
     @staticmethod
     def _vertical_page_gain(
         anchor_y: float,
@@ -852,27 +978,24 @@ class OMRScanner:
             marker_start_index = max(1, int(layout.get("marker_start_index", 1)))
             row_start_from_marker = self._to_bool(layout.get("row_start_from_marker", True), True)
 
-            rotated_img, markers = self.marker_detector.normalize_orientation(
+            scan_ctx = self._prepare_scan_context(
                 original_img,
-                expected_location=marker_location,
-                min_count=3,
-            )
-            if rotated_img is None:
-                return "ERR", [], None, "IMG_NONE"
-
-            rotated_img, markers, _ = self._apply_marker_deskew(
-                rotated_img,
-                markers,
                 marker_location=marker_location,
-                config=layout,
+                layout_config=layout,
+                scale=scale,
             )
-
-            work_img, processed_img = self.image_processor.preprocess(rotated_img)
-            if work_img is None or processed_img is None:
+            ctx_error = str(scan_ctx.get("error_status", "") or "")
+            if ctx_error == "IMG_NONE":
+                return "ERR", [], None, "IMG_NONE"
+            if ctx_error == "PREPROCESS":
                 return "ERR", [], None, "PREPROCESS"
-            debug_img = work_img.copy()
+            if ctx_error:
+                return "ERR", [], None, ctx_error
 
-            markers = list(markers or [])
+            work_img = scan_ctx.get("work_img")
+            processed_img = scan_ctx.get("processed_img")
+            debug_img = scan_ctx.get("debug_img")
+            markers = list(scan_ctx.get("markers") or [])
             if debug_img is not None:
                 for m in markers:
                     cv2.circle(debug_img, (int(m.cx), int(m.cy)), 3, (0, 0, 255), -1)
@@ -984,14 +1107,10 @@ class OMRScanner:
                     if not (0 <= idx0 < len(marks_by_y)):
                         return "ERR", [], debug_img, "TIMING_MARK"
                     row_anchor_map[row_idx] = marks_by_y[idx0]
-            marker_axis = marks_by_x if is_horizontal_target else marks_by_y
-            geom_scale_x, geom_scale_y = self._compute_global_scale_factors(
-                work_img,
-                marker_axis,
-                marker_location,
-                scale,
-                cfg=layout,
-            )
+            geometry_data = dict(scan_ctx.get("geometry_data") or {})
+            marker_axis = list(geometry_data.get("marker_axis") or (marks_by_x if is_horizontal_target else marks_by_y))
+            geom_scale_x = float(geometry_data.get("global_scale_x", scale))
+            geom_scale_y = float(geometry_data.get("global_scale_y", scale))
 
             # Unified geometry:
             # target = anchor + (config_offset * global_scale) + (config_offset * section_offset)
@@ -1005,12 +1124,8 @@ class OMRScanner:
             raw_row_dy = float(layout.get("row_dy", 70))
             effective_row_dy = float(raw_row_dy) * float(geom_scale_y)
             question_off_x, question_off_y = self._combined_offset("question")
-            expected_w_scaled, expected_h_scaled = self._resolve_scaled_layout_canvas(
-                layout,
-                img_w=int(work_img.shape[1]),
-                img_h=int(work_img.shape[0]),
-                base_scale=float(scale),
-            )
+            expected_w_scaled = float(geometry_data.get("expected_w_scaled", 0.0))
+            expected_h_scaled = float(geometry_data.get("expected_h_scaled", 0.0))
             try:
                 expected_anchor_y = float(
                     layout.get(
@@ -1519,33 +1634,36 @@ class OMRScanner:
         marker_location = "left"
         axis_key = "cy"
         marker_axis: List[Marker] = []
-        base_img = original_img
+        context_layout = dict(full_layout)
+        marker_location_for_context = ""
         if marker_field is not None:
             marker_location = str(marker_field.get("marker_location", "left")).strip().lower()
-            base_img, markers = self.marker_detector.normalize_orientation(
-                original_img,
-                expected_location=marker_location,
-                min_count=3,
-            )
-            if base_img is None:
-                return False, {}, None
-
-            deskew_cfg = dict(full_layout)
+            marker_location_for_context = marker_location
             for key in ("deskew_with_markers", "deskew_max_deg", "deskew_min_deg", "deskew_inlier_percentile"):
                 if marker_field.get(key) is not None:
-                    deskew_cfg[key] = marker_field.get(key)
-            base_img, markers, _ = self._apply_marker_deskew(
-                base_img,
-                markers,
-                marker_location=marker_location,
-                config=deskew_cfg,
-            )
+                    context_layout[key] = marker_field.get(key)
 
-            axis_key = "cx" if marker_location in ("top", "bottom") else "cy"
-            marker_axis = sorted(
-                list(markers or []),
-                key=lambda m: int(getattr(m, axis_key, 0)),
-            )
+        scan_ctx = self._prepare_scan_context(
+            original_img,
+            marker_location=marker_location_for_context,
+            layout_config=context_layout,
+            scale=scale,
+        )
+        if str(scan_ctx.get("error_status", "") or ""):
+            return False, {}, None
+
+        work_img = scan_ctx.get("work_img")
+        processed_img = scan_ctx.get("processed_img")
+        if work_img is None or processed_img is None:
+            return False, {}, None
+        debug_img = np.zeros_like(work_img)
+        info: Dict[str, Any] = {}
+        is_ok = True
+        geometry_data = dict(scan_ctx.get("geometry_data") or {})
+        axis_key = str(scan_ctx.get("axis_key", "cy"))
+        marker_axis = list(scan_ctx.get("marker_axis") or [])
+
+        if marker_field is not None:
             required_idx = self._required_marker_index_for_fields(normalized_fields)
             if required_idx > 0 and len(marker_axis) < required_idx:
                 cluster_axis = self._select_contiguous_marker_cluster(
@@ -1557,12 +1675,6 @@ class OMRScanner:
                 if cluster_axis:
                     marker_axis = cluster_axis
 
-        work_img, processed_img = self.image_processor.preprocess(base_img)
-        if work_img is None or processed_img is None:
-            return False, {}, None
-        debug_img = np.zeros_like(work_img)
-        info: Dict[str, Any] = {}
-        is_ok = True
         marker_axis_for_decode = list(marker_axis)
 
         if marker_axis_for_decode and marker_fields:
@@ -1575,13 +1687,25 @@ class OMRScanner:
                 if len(interp_axis) > len(marker_axis_for_decode):
                     marker_axis_for_decode = sorted(interp_axis, key=lambda m: int(getattr(m, axis_key, 0)))
 
-        global_scale_x, global_scale_y = self._compute_global_scale_factors(
-            work_img,
-            marker_axis_for_decode,
-            marker_location,
-            scale,
-            cfg=full_layout,
+        global_scale_x = float(geometry_data.get("global_scale_x", scale))
+        global_scale_y = float(geometry_data.get("global_scale_y", scale))
+        marker_axis_changed = (
+            len(marker_axis_for_decode) != len(marker_axis)
+            or any(
+                (int(a.cx) != int(b.cx)) or (int(a.cy) != int(b.cy))
+                for a, b in zip(marker_axis_for_decode, marker_axis)
+            )
         )
+        if marker_axis_for_decode and marker_axis_changed:
+            geometry_data = self._build_scan_geometry_data(
+                work_img,
+                marker_axis_for_decode,
+                marker_location,
+                scale,
+                full_layout,
+            )
+            global_scale_x = float(geometry_data.get("global_scale_x", scale))
+            global_scale_y = float(geometry_data.get("global_scale_y", scale))
 
         def _decode_marker_field(
             field_cfg: Dict[str, Any],

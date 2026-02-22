@@ -69,6 +69,8 @@ class BaseErrorCorrectionDialog(QDialog):
         self._orig_pixmap = None
         self._warp_pixmap = None
         self._show_warped = True
+        self.progress_title_text = "오류 진행"
+        self.progress_hint_text = "현재/전체"
 
         self.init_ui()
         self.connect_signals()
@@ -99,7 +101,7 @@ class BaseErrorCorrectionDialog(QDialog):
 
         top_panel = QFrame()
         top_panel.setObjectName("topPanel")
-        top_panel.setFixedHeight(110)
+        top_panel.setFixedHeight(132)
         top_layout = QHBoxLayout(top_panel)
         top_layout.setContentsMargins(0, 0, 0, 0)
         top_layout.setSpacing(10)
@@ -110,17 +112,17 @@ class BaseErrorCorrectionDialog(QDialog):
         v_idx = QVBoxLayout(card_idx)
         v_idx.setContentsMargins(12, 10, 12, 10)
         v_idx.setSpacing(6)
-        lbl_idx_title = QLabel("오류 진행")
-        lbl_idx_title.setObjectName("cardTitle")
+        self.lbl_idx_title = QLabel("오류 진행")
+        self.lbl_idx_title.setObjectName("cardTitle")
         self.lbl_idx = QLabel("1/1")
         self.lbl_idx.setObjectName("progressValue")
         self.lbl_idx.setAlignment(Qt.AlignCenter)
-        lbl_idx_hint = QLabel("현재/전체")
-        lbl_idx_hint.setObjectName("progressHint")
-        lbl_idx_hint.setAlignment(Qt.AlignCenter)
-        v_idx.addWidget(lbl_idx_title, 0, Qt.AlignLeft)
+        self.lbl_idx_hint = QLabel("현재/전체")
+        self.lbl_idx_hint.setObjectName("progressHint")
+        self.lbl_idx_hint.setAlignment(Qt.AlignCenter)
+        v_idx.addWidget(self.lbl_idx_title, 0, Qt.AlignLeft)
         v_idx.addWidget(self.lbl_idx)
-        v_idx.addWidget(lbl_idx_hint)
+        v_idx.addWidget(self.lbl_idx_hint)
         top_layout.addWidget(card_idx)
 
         card_nav = QFrame()
@@ -167,17 +169,21 @@ class BaseErrorCorrectionDialog(QDialog):
 
         card_save = QFrame()
         card_save.setObjectName("cardPrimary")
-        card_save.setMinimumWidth(240)
+        card_save.setMinimumWidth(300)
         v_save = QVBoxLayout(card_save)
         v_save.setContentsMargins(12, 10, 12, 10)
         v_save.setSpacing(6)
         lbl_save_title = QLabel("저장")
         lbl_save_title.setObjectName("cardTitle")
-        self.btn_save = QPushButton("확인/저장 후 다음 (S)")
+        self.btn_save = QPushButton("저장 확인 / 저장 후 다음 (S)")
         self.btn_save.setObjectName("primaryButton")
         self.btn_save.setFixedHeight(40)
+        self.lbl_save_hint = QLabel("저장하면 다음 미점검 오류 항목으로 이동합니다.")
+        self.lbl_save_hint.setObjectName("saveHint")
+        self.lbl_save_hint.setWordWrap(True)
         v_save.addWidget(lbl_save_title, 0, Qt.AlignLeft)
         v_save.addWidget(self.btn_save)
+        v_save.addWidget(self.lbl_save_hint)
         top_layout.addWidget(card_save)
 
         card_view = QFrame()
@@ -272,6 +278,7 @@ class BaseErrorCorrectionDialog(QDialog):
             #cardTitle { color: #5B6775; font-weight: 600; font-size: 12px; }
             #progressValue { color: #2563EB; font-size: 26px; font-weight: 700; }
             #progressHint { color: #8B95A1; font-size: 11px; }
+            #saveHint { color: #5B6775; font-size: 11px; }
             QPushButton {
                 background: #FFFFFF;
                 border: 1px solid #CBD5E1;
@@ -299,6 +306,25 @@ class BaseErrorCorrectionDialog(QDialog):
             }
         """
         )
+
+    def set_progress_display(self, current, total, title: Optional[str] = None, hint: Optional[str] = None):
+        cur_text = str(current)
+        total_text = str(total)
+        self.lbl_idx.setText(f"{cur_text}/{total_text}")
+        if title is not None:
+            self.progress_title_text = str(title)
+        if hint is not None:
+            self.progress_hint_text = str(hint)
+        if hasattr(self, "lbl_idx_title"):
+            self.lbl_idx_title.setText(self.progress_title_text)
+        if hasattr(self, "lbl_idx_hint"):
+            self.lbl_idx_hint.setText(self.progress_hint_text)
+
+    def set_navigation_enabled(self, has_prev: bool, has_next: bool):
+        if hasattr(self, "btn_prev"):
+            self.btn_prev.setEnabled(bool(has_prev))
+        if hasattr(self, "btn_next"):
+            self.btn_next.setEnabled(bool(has_next))
 
     def _create_table(self):
         table = QTableWidget()

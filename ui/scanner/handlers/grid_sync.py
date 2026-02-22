@@ -527,17 +527,19 @@ class GridSyncMixin:
 
         action = menu.exec_(self.main_grid.viewport().mapToGlobal(pos))
         if action == act_review:
+            selected_rows = self._get_selected_rows()
             read_nums = self._get_selected_read_nums()
             if not read_nums:
                 QMessageBox.information(self, "안내", "검토할 항목을 다시 선택해주세요.")
                 return
             rn = read_nums[0]
+            grid_row_index = selected_rows[0] if selected_rows else None
             try:
                 row_data = self._get_row_data_by_read_num(rn)
                 if not row_data:
                     QMessageBox.warning(self, "오류", f"판독번호 {rn} 데이터를 찾을 수 없습니다.")
                     return
-                self._open_review_for_row(row_data)
+                self._open_review_for_row(row_data, grid_row_index=grid_row_index)
             except Exception as e:
                 self._set_last_error_message(str(e))
                 QMessageBox.critical(self, "오류", f"판독결과 조회/수정 중 오류가 발생했습니다.\n{e}")

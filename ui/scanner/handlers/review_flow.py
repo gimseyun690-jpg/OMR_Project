@@ -147,7 +147,24 @@ class ReviewFlowMixin:
                 0,
                 int(getattr(self, "session_end_read_num", 0)) - int(getattr(self, "session_start_read_num", 1)) + 1,
             )
-            dlg.lbl_idx.setText(f"{current_idx + 1}/{session_total}")  # 오류 순번/세션 총 검사 수
+            if session_total <= 0:
+                try:
+                    session_total = int(self.main_grid.rowCount())
+                except Exception:
+                    session_total = 0
+            if session_total <= 0:
+                session_total = max(1, len(self.error_queue))
+            if hasattr(dlg, "set_progress_display"):
+                dlg.set_progress_display(
+                    read_num,
+                    session_total,
+                    title="오류 진행",
+                    hint="판독번호/총판독매수",
+                )
+            else:
+                dlg.lbl_idx.setText(f"{read_num}/{session_total}")
+            if hasattr(dlg, "set_navigation_enabled"):
+                dlg.set_navigation_enabled(current_idx > 0, current_idx < (len(self.error_queue) - 1))
 
             # exec_() 호출 시 창을 닫을 때까지 대기
             try:
@@ -272,6 +289,56 @@ class ReviewFlowMixin:
             dialog_cls = ChurchErrorCorrectionDialog
         return dialog_cls(self, debug_img, scan_results, image_path)
 
+    def _get_room_grid_read_nums(self):
+        read_nums = []
+        grid = getattr(self, "main_grid", None)
+        if grid is None:
+            return read_nums
+        for r in range(grid.rowCount()):
+            item = grid.item(r, 0)
+            if not item:
+                continue
+            try:
+                read_nums.append(int(item.text()))
+            except Exception:
+                continue
+        return read_nums
+
+    def _find_grid_row_index_by_read_num(self, read_num: int):
+        grid = getattr(self, "main_grid", None)
+        if grid is None:
+            return None
+        for r in range(grid.rowCount()):
+            item = grid.item(r, 0)
+            if not item:
+                continue
+            try:
+                if int(item.text()) == int(read_num):
+                    return r
+            except Exception:
+                continue
+        return None
+
+    def _find_next_unreviewed_error_pos_in_room(self, room_read_nums, start_pos: int, direction: int = 1):
+        pos = int(start_pos)
+        step = 1 if int(direction) >= 0 else -1
+        while 0 <= pos < len(room_read_nums):
+            rn = room_read_nums[pos]
+            db_row = self.controller.get_scan_by_read_num(self.current_db_path, rn)
+            if not db_row:
+                pos += step
+                continue
+            is_valid = db_row[7] if len(db_row) > 7 else 0
+            review_done = db_row[13] if len(db_row) > 13 else 0
+            try:
+                invalid = int(is_valid) != 1
+            except Exception:
+                invalid = True
+            if invalid and not bool(review_done):
+                return pos
+            pos += step
+        return None
+
     def _blend_custom_fields_debug(self, debug_img, aligned_img, scale: float):
         if debug_img is None or aligned_img is None:
             return debug_img
@@ -331,107 +398,178 @@ class ReviewFlowMixin:
             return
         self.controller.save_corrected_data(self.current_db_path, original_row, modified_results)
 
-    def _open_review_for_row(self, row_data):
+    def _open_review_for_row(self, row_data, grid_row_index=None):
         if not row_data:
             return
+
         try:
-            read_num, image_path, result_str = self._extract_review_row_fields(row_data)
+            start_read_num, _, _ = self._extract_review_row_fields(row_data)
         except Exception as e:
             self._set_last_error_message(str(e))
             QMessageBox.warning(self, "오류", f"선택 데이터가 손상되어 열 수 없습니다.\n{e}")
             return
-        if not image_path or not os.path.exists(image_path):
-            msg = f"이미지 파일을 찾을 수 없습니다.\n{image_path}"
-            self._set_last_error_message(msg)
-            QMessageBox.warning(self, "오류", msg)
-            return
-        scan_results = self.parse_result_string(result_str)
 
-        image_cv = None
-        try:
-            img_array = np.fromfile(image_path, np.uint8)
-            image_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-        except Exception as e:
-            print(f"이미지 로드 실패: {e}")
-            self._set_last_error_message(str(e))
-        if image_cv is None:
-            msg = "이미지를 읽지 못해 판독결과 창을 열 수 없습니다."
-            self._set_last_error_message(msg)
-            QMessageBox.warning(self, "오류", msg)
-            return
-
-        debug_img = image_cv
-        try:
-            if image_cv is not None and hasattr(self, "pipeline") and isinstance(self.pipeline.form_data, dict):
-                aligned_img, _, _ = self.pipeline.engine.align_image_warp(image_cv)
-                if aligned_img is not None:
-                    scale = self.pipeline._get_scale_factor()
-                    layout_mode = self.pipeline.form_manager.get_layout_mode()
-                    if self.pipeline._is_new_marker_schema():
-                        questions = (
-                            self.pipeline.engine.parse_config(self.pipeline.form_data)
-                            if "question_groups" in self.pipeline.form_data
-                            else self.pipeline.form_data.get("questions", [])
-                        )
-                        question_layout = self.pipeline.form_data.get("question_layout", {}) or {}
-                        marker_location = self.pipeline.form_data.get("marker_location", "left")
-                        _, _, debug_img, _ = self.pipeline.engine.analyze_marker_questions(
-                            aligned_img,
-                            questions,
-                            question_layout,
-                            scale=scale,
-                            marker_location=marker_location,
-                        )
-                    elif layout_mode == "side_marker":
-                        questions, question_layout, marker_location = self.pipeline._build_legacy_side_marker_schema()
-                        _, _, debug_img, _ = self.pipeline.engine.analyze_marker_questions(
-                            aligned_img,
-                            questions,
-                            question_layout,
-                            scale=scale,
-                            marker_location=marker_location,
-                        )
-                    elif layout_mode == "timing_mark":
-                        debug_img = aligned_img
-                    else:
-                        rois = self.pipeline.form_manager.get_fixed_rois(scale=scale)
-                        _, _, debug_img = self.pipeline.engine.analyze_sheet_cv(aligned_img, rois)
-                    debug_img = self._blend_custom_fields_debug(debug_img, aligned_img, scale)
-        except Exception as e:
-            print(f"[REVIEW] debug overlay 실패: {e}")
-
-        try:
-            dlg = self._create_error_editor_dialog(debug_img, scan_results, image_path)
-            dlg.lbl_idx.setText(str(read_num))
-            dlg.exec_()
-        except Exception as e:
-            print(f"[REVIEW] 단건 검토 다이얼로그 실행 실패: {e}")
-            print(traceback.format_exc())
-            self._set_last_error_message(str(e))
-            QMessageBox.critical(self, "오류", f"판독결과 조회/수정 창 실행 중 오류가 발생했습니다.\n{e}")
-            return
-
-        exit_code = getattr(dlg, "exit_code", 0)
-        if exit_code == 1:
+        room_read_nums = self._get_room_grid_read_nums()
+        if room_read_nums and start_read_num in room_read_nums:
+            if grid_row_index is None:
+                grid_row_index = self._find_grid_row_index_by_read_num(start_read_num)
             try:
-                self.save_corrected_data(row_data, dlg.scan_results)
-                self.update_statistics()
-                self._schedule_summary_refresh()
-                self.controller.update_review_done(self.current_db_path, read_num, 1)
-                self._refresh_grid_row_by_read_num(read_num)
+                current_pos = int(grid_row_index)
+            except Exception:
+                current_pos = room_read_nums.index(start_read_num)
+            if current_pos < 0 or current_pos >= len(room_read_nums):
+                current_pos = room_read_nums.index(start_read_num)
+        else:
+            room_read_nums = [start_read_num]
+            current_pos = 0
+
+        room_total = max(1, len(room_read_nums))
+        touched_any = False
+
+        while 0 <= current_pos < len(room_read_nums):
+            target_read_num = room_read_nums[current_pos]
+            current_row_data = self._get_row_data_by_read_num(target_read_num)
+            if not current_row_data and target_read_num == start_read_num:
+                current_row_data = row_data
+            if not current_row_data:
+                QMessageBox.warning(self, "오류", f"판독번호 {target_read_num} 데이터를 찾을 수 없습니다.")
+                break
+
+            try:
+                read_num, image_path, result_str = self._extract_review_row_fields(current_row_data)
             except Exception as e:
-                print(f"[REVIEW] 단건 저장 실패: {e}")
+                self._set_last_error_message(str(e))
+                QMessageBox.warning(self, "오류", f"선택 데이터가 손상되어 열 수 없습니다.\n{e}")
+                break
+            if not image_path or not os.path.exists(image_path):
+                msg = f"이미지 파일을 찾을 수 없습니다.\n{image_path}"
+                self._set_last_error_message(msg)
+                QMessageBox.warning(self, "오류", msg)
+                break
+            scan_results = self.parse_result_string(result_str)
+
+            image_cv = None
+            try:
+                img_array = np.fromfile(image_path, np.uint8)
+                image_cv = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            except Exception as e:
+                print(f"이미지 로드 실패: {e}")
+                self._set_last_error_message(str(e))
+            if image_cv is None:
+                msg = "이미지를 읽지 못해 판독결과 창을 열 수 없습니다."
+                self._set_last_error_message(msg)
+                QMessageBox.warning(self, "오류", msg)
+                break
+
+            debug_img = image_cv
+            try:
+                if image_cv is not None and hasattr(self, "pipeline") and isinstance(self.pipeline.form_data, dict):
+                    aligned_img, _, _ = self.pipeline.engine.align_image_warp(image_cv)
+                    if aligned_img is not None:
+                        scale = self.pipeline._get_scale_factor()
+                        layout_mode = self.pipeline.form_manager.get_layout_mode()
+                        if self.pipeline._is_new_marker_schema():
+                            questions = (
+                                self.pipeline.engine.parse_config(self.pipeline.form_data)
+                                if "question_groups" in self.pipeline.form_data
+                                else self.pipeline.form_data.get("questions", [])
+                            )
+                            question_layout = self.pipeline.form_data.get("question_layout", {}) or {}
+                            marker_location = self.pipeline.form_data.get("marker_location", "left")
+                            _, _, debug_img, _ = self.pipeline.engine.analyze_marker_questions(
+                                aligned_img,
+                                questions,
+                                question_layout,
+                                scale=scale,
+                                marker_location=marker_location,
+                            )
+                        elif layout_mode == "side_marker":
+                            questions, question_layout, marker_location = self.pipeline._build_legacy_side_marker_schema()
+                            _, _, debug_img, _ = self.pipeline.engine.analyze_marker_questions(
+                                aligned_img,
+                                questions,
+                                question_layout,
+                                scale=scale,
+                                marker_location=marker_location,
+                            )
+                        elif layout_mode == "timing_mark":
+                            debug_img = aligned_img
+                        else:
+                            rois = self.pipeline.form_manager.get_fixed_rois(scale=scale)
+                            _, _, debug_img = self.pipeline.engine.analyze_sheet_cv(aligned_img, rois)
+                        debug_img = self._blend_custom_fields_debug(debug_img, aligned_img, scale)
+            except Exception as e:
+                print(f"[REVIEW] debug overlay 실패: {e}")
+
+            try:
+                dlg = self._create_error_editor_dialog(debug_img, scan_results, image_path)
+                if hasattr(dlg, "set_progress_display"):
+                    dlg.set_progress_display(
+                        current_pos + 1,
+                        room_total,
+                        title="오류 진행",
+                        hint="현재행/고사실전체행",
+                    )
+                else:
+                    dlg.lbl_idx.setText(f"{current_pos + 1}/{room_total}")
+                if hasattr(dlg, "set_navigation_enabled"):
+                    dlg.set_navigation_enabled(current_pos > 0, current_pos < (room_total - 1))
+                dlg.exec_()
+            except Exception as e:
+                print(f"[REVIEW] 단건 검토 다이얼로그 실행 실패: {e}")
                 print(traceback.format_exc())
                 self._set_last_error_message(str(e))
-                QMessageBox.critical(self, "오류", f"저장 중 오류가 발생했습니다.\n{e}")
-        elif exit_code in (2, 3):
-            try:
-                self.controller.update_review_done(self.current_db_path, read_num, 1)
-                self._refresh_grid_row_by_read_num(read_num)
-            except Exception as e:
-                print(f"[REVIEW] 단건 상태 반영 실패: {e}")
-                print(traceback.format_exc())
-                self._set_last_error_message(str(e))
+                QMessageBox.critical(self, "오류", f"판독결과 조회/수정 창 실행 중 오류가 발생했습니다.\n{e}")
+                break
+
+            exit_code = getattr(dlg, "exit_code", 0)
+            if exit_code == 0:
+                break
+
+            if exit_code == 1:
+                try:
+                    self.save_corrected_data(current_row_data, dlg.scan_results)
+                    self.controller.update_review_done(self.current_db_path, read_num, 1)
+                    self._refresh_grid_row_by_read_num(read_num)
+                    touched_any = True
+                except Exception as e:
+                    print(f"[REVIEW] 단건 저장 실패: {e}")
+                    print(traceback.format_exc())
+                    self._set_last_error_message(str(e))
+                    QMessageBox.critical(self, "오류", f"저장 중 오류가 발생했습니다.\n{e}")
+                    break
+                next_pos = self._find_next_unreviewed_error_pos_in_room(room_read_nums, current_pos + 1, 1)
+                if next_pos is None:
+                    break
+                current_pos = next_pos
+                continue
+
+            if exit_code in (2, 3):
+                try:
+                    self.controller.update_review_done(self.current_db_path, read_num, 1)
+                    self._refresh_grid_row_by_read_num(read_num)
+                    touched_any = True
+                except Exception as e:
+                    print(f"[REVIEW] 단건 상태 반영 실패: {e}")
+                    print(traceback.format_exc())
+                    self._set_last_error_message(str(e))
+                    break
+
+                next_pos = current_pos - 1 if exit_code == 2 else current_pos + 1
+                if next_pos < 0:
+                    QMessageBox.information(self, "알림", "첫 행입니다.")
+                    continue
+                if next_pos >= room_total:
+                    QMessageBox.information(self, "알림", "마지막 행입니다.")
+                    continue
+                current_pos = next_pos
+                continue
+
+            break
+
+        if touched_any:
+            self.update_statistics()
+            self._schedule_summary_refresh()
 
     def update_review_summary(self):
         if not self.current_db_path:
