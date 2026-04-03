@@ -50,7 +50,7 @@
       "rows_per_digit": [
         2,
         10,
-        2,
+        4,
         10
       ],
       "box_w": 35,
@@ -139,7 +139,7 @@
     "x_offset": 0,
     "choice_dx": 59,
     "box_w": 35,
-    "box_h": 35,
+    "box_h": 40,
     "row_offset_y": 0,
     "row_start_y": 450,
     "row_start_from_marker": true,
@@ -152,6 +152,7 @@
     "numbering_order": "column_major",
     "columns": 4,
     "fixed_anchor_mode": true,
+    "fixed_anchor_y_mode": "median",
     "column_anchor_indices": [
       1,
       6,

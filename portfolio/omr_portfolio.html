@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OMR 프로젝트 포트폴리오</title>
+  <link rel="stylesheet" href="./omr_portfolio.css">
+</head>
+<body>
+  <aside class="toolbar">
+    <div class="toolbar__inner">
+      <p class="toolbar__eyebrow">OMR Portfolio</p>
+      <h1 class="toolbar__title">NAVER WORKS 지원용<br>OMR 프로젝트 포트폴리오</h1>
+      <p class="toolbar__desc">
+        문제, 판단, 개선, 결과가 바로 읽히도록
+        6페이지 제출본 기준으로 다시 정리한 버전입니다.
+      </p>
+
+      <div class="toolbar__actions">
+        <button type="button" class="toolbar__button" data-action="print">PDF 저장</button>
+      </div>
+
+      <nav class="toolbar__nav" aria-label="페이지 이동">
+        <a href="#page-1">1. 프로젝트 정의</a>
+        <a href="#page-2">2. 문제 정의</a>
+        <a href="#page-3">3. 내가 정한 기준</a>
+        <a href="#page-4">4. Before → After</a>
+        <a href="#page-5">5. 결과와 검증</a>
+        <a href="#page-6">6. 직무 연결</a>
+      </nav>
+
+      <div class="toolbar__note">
+        <p>출력 가이드</p>
+        <ul>
+          <li>A4 세로</li>
+          <li>배경 그래픽 켜기</li>
+          <li>헤더/푸터 끄기</li>
+        </ul>
+      </div>
+    </div>
+  </aside>
+
+  <main class="portfolio">
+    <section class="page page--cover" id="page-1" data-page="1">
+      <header class="page__header">
+        <div>
+          <p class="eyebrow">Project Definition</p>
+          <p class="meta">Python · PyQt 기반 OMR 판독 프로젝트</p>
+        </div>
+        <p class="page__number">01</p>
+      </header>
+
+      <div class="hero">
+        <p class="hero__badge">NAVER WORKS 서비스 기획/운영 지원 포지셔닝</p>
+        <h2 class="hero__title">판독 기능이 아니라<br>판독 이후 처리를 설계한 프로젝트</h2>
+        <p class="hero__summary">
+          OMR 판독 프로그램을 만들었지만, 포트폴리오의 핵심은 결과 확인과 오류 수정 경험 설계다.
+          사용자가 무엇을 다시 봐야 하는지, 어디서 수정해야 하는지, 수정 후 무엇이 달라지는지가 바로 이해되도록 구조를 정리했다.
+        </p>
+      </div>
+
+      <div class="key-grid key-grid--three">
+        <article class="key-card">
+          <p class="card__label">프로젝트 정의</p>
+          <h3>스캔 이미지 분석과 결과 저장</h3>
+          <p>판독 엔진과 데스크톱 UI를 연결해 실제 운영 흐름에 맞는 도구 형태로 구현했다.</p>
+        </article>
+
+        <article class="key-card">
+          <p class="card__label">핵심 문제</p>
+          <h3>판독 이후 판단 비용</h3>
+          <p>재검토 대상 식별, 수정 판단, 상태 반영이 바로 읽히지 않으면 운영 단계에서 다시 시간이 든다.</p>
+        </article>
+
+        <article class="key-card">
+          <p class="card__label">보여주려는 역량</p>
+          <h3>운영 관점의 기준 설계</h3>
+          <p>기능 구현보다 먼저, 무엇을 구분하고 무엇을 다시 보게 할지 정하는 역할에 집중했다.</p>
+        </article>
+      </div>
+
+      <div class="memory-line">
+        기능을 구현하는 데서 멈추지 않고, 사용자의 다음 행동이 분명한 운영 경험으로 바꾼 프로젝트.
+      </div>
+
+      <footer class="page__footer">
+        <span>프로젝트 한 줄 정의</span>
+        <span>판독 이후 처리 경험 설계</span>
+      </footer>
+    </section>
+
+    <section class="page" id="page-2" data-page="2">
+      <header class="page__header">
+        <div>
+          <p class="eyebrow">Problem Definition</p>
+          <p class="meta">업무는 결과 출력 뒤에 시작된다</p>
+        </div>
+        <p class="page__number">02</p>
+      </header>
+
+      <div class="section-title">
+        <h2>문제는 판독 실패보다<br>판독 이후 판단 비용이었다</h2>
+        <p>판독이 되기만 해서는 충분하지 않다. 실제 사용자는 결과가 나온 뒤 재검토 대상을 찾고, 오류 이유를 이해하고, 수정 이후 상태를 다시 확인해야 한다.</p>
+      </div>
+
+      <div class="split-layout split-layout--problem">
+        <div class="stack">
+          <article class="issue-card">
+            <p class="card__label">문제 1</p>
+            <h3>재검토 대상을 바로 찾기 어렵다</h3>
+            <p>정상 건과 다시 봐야 하는 건이 바로 나뉘지 않으면 확인 비용이 커진다.</p>
+          </article>
+
+          <article class="issue-card">
+            <p class="card__label">문제 2</p>
+            <h3>오류 이유가 다음 행동으로 이어지지 않는다</h3>
+            <p>오류 메시지가 있어도 무엇을 다시 확인해야 하는지 곧바로 알기 어렵다.</p>
+          </article>
+
+          <article class="issue-card">
+            <p class="card__label">문제 3</p>
+            <h3>수정 후 상태를 다시 추적해야 한다</h3>
+            <p>완료 여부와 수동 수정 기록이 분리되지 않으면 같은 작업이 반복된다.</p>
+          </article>
+        </div>
+
+        <figure class="screen-card">
+          <img src="./assets/screen-main.png" alt="OMR 메인 운영 화면">
+          <figcaption>메인 운영 화면. 결과 목록, 시험실 단위 정보, 오류 검토 버튼이 함께 있어 무엇을 먼저 보게 할지가 핵심 문제였다.</figcaption>
+        </figure>
+      </div>
+
+      <footer class="page__footer">
+        <span>문제 정의</span>
+        <span>재검토 대상 식별과 수정 판단의 비용</span>
+      </footer>
+    </section>
+
+    <section class="page" id="page-3" data-page="3">
+      <header class="page__header">
+        <div>
+          <p class="eyebrow">My Decision</p>
+          <p class="meta">구현 범위보다 중요한 기준 정의</p>
+        </div>
+        <p class="page__number">03</p>
+      </header>
+
+      <div class="section-title">
+        <h2>내가 직접 정한 기준은<br>3가지였다</h2>
+        <p>이 프로젝트에서 중요한 일은 화면을 많이 만드는 것이 아니라, 무엇을 구분하고 무엇을 다시 보게 할지 기준을 정하는 일이었다.</p>
+      </div>
+
+      <div class="decision-grid">
+        <article class="decision-card">
+          <p class="card__label">기준 1</p>
+          <h3>판독 상태와 검토 상태를 분리했다</h3>
+          <p>판독 오류와 검토 완료는 다른 판단이다. 같은 값으로 처리하지 않고 다른 상태로 관리했다.</p>
+        </article>
+
+        <article class="decision-card">
+          <p class="card__label">기준 2</p>
+          <h3>오류를 재검토 대상 중심으로 묶었다</h3>
+          <p>전체 결과를 반복해 훑지 않도록, 다시 볼 필요가 있는 건을 별도 흐름으로 다뤘다.</p>
+        </article>
+
+        <article class="decision-card">
+          <p class="card__label">기준 3</p>
+          <h3>수정은 기록으로 남기게 했다</h3>
+          <p>한 번 고친 결과가 끝이 아니라, 이후에도 확인 가능한 이력으로 남도록 설계했다.</p>
+        </article>
+      </div>
+
+      <article class="note-card">
+        <p class="card__label">직접 다룬 범위</p>
+        <ul class="compact-list">
+          <li>결과 구조 설계</li>
+          <li>오류 검토 큐 설계</li>
+          <li>수동 수정 로그와 상태 반영 기준 정리</li>
+        </ul>
+      </article>
+
+      <footer class="page__footer">
+        <span>내가 정한 기준</span>
+        <span>상태 분리 · 재검토 큐 · 수정 이력</span>
+      </footer>
+    </section>
+
+    <section class="page" id="page-4" data-page="4">
+      <header class="page__header">
+        <div>
+          <p class="eyebrow">Before → After</p>
+          <p class="meta">정확도보다 수정 가능한 운영 흐름</p>
+        </div>
+        <p class="page__number">04</p>
+      </header>
+
+      <div class="section-title">
+        <h2>문제를 이렇게 바꿨다</h2>
+        <p>핵심은 오류를 없애는 것이 아니라, 오류가 생겼을 때 사용자가 덜 막히도록 흐름을 바꾸는 일이었다.</p>
+      </div>
+
+      <div class="split-layout split-layout--solution">
+        <div class="comparison-table">
+          <div class="comparison-row comparison-row--head">
+            <span>Before</span>
+            <span>판단</span>
+            <span>After</span>
+          </div>
+
+          <div class="comparison-row">
+            <span>목록 전체를 훑어야 했다</span>
+            <span>재검토 대상을 먼저 분리한다</span>
+            <span>오류 건 중심으로 검토를 시작하게 했다</span>
+          </div>
+
+          <div class="comparison-row">
+            <span>이미지와 결과를 따로 봐야 했다</span>
+            <span>수정 판단은 한 화면에서 끝나야 한다</span>
+            <span>이미지, 결과, 저장, 이동을 같은 화면에 묶었다</span>
+          </div>
+
+          <div class="comparison-row">
+            <span>수정 이후 상태가 모호했다</span>
+            <span>완료 여부가 다시 반영돼야 한다</span>
+            <span>검토 상태와 수정 이력을 함께 남기게 했다</span>
+          </div>
+        </div>
+
+        <figure class="screen-card">
+          <img src="./assets/screen-review.png" alt="OMR 오류 수정 화면">
+          <figcaption>오류 수정 화면. 이미지와 결과를 한 화면에서 비교하게 해 수정 판단 단계를 줄였다.</figcaption>
+        </figure>
+      </div>
+
+      <footer class="page__footer">
+        <span>문제 → 판단 → 개선</span>
+        <span>수정 가능한 운영 흐름으로 전환</span>
+      </footer>
+    </section>
+
+    <section class="page" id="page-5" data-page="5">
+      <header class="page__header">
+        <div>
+          <p class="eyebrow">Outcome</p>
+          <p class="meta">수치 대신 구조에 남은 결과</p>
+        </div>
+        <p class="page__number">05</p>
+      </header>
+
+      <div class="section-title">
+        <h2>결과는 수치보다<br>구조에 남았다</h2>
+        <p>외부 성과 수치를 제시할 수 있는 작업은 아니었다. 대신 운영 가능한 구조가 남은 점이 이 프로젝트의 결과다.</p>
+      </div>
+
+      <div class="result-grid">
+        <article class="key-card">
+          <p class="card__label">결과 1</p>
+          <h3>오류 건 중심 검토 구조</h3>
+          <p>전체 목록 반복 확인 대신, 다시 볼 필요가 있는 건을 별도 흐름으로 다뤘다.</p>
+        </article>
+
+        <article class="key-card">
+          <p class="card__label">결과 2</p>
+          <h3>상태 기반 결과 화면</h3>
+          <p>정상 여부와 검토 완료 여부를 분리해 현재 상태를 더 쉽게 읽게 했다.</p>
+        </article>
+
+        <article class="key-card">
+          <p class="card__label">결과 3</p>
+          <h3>수정 이력과 재확인 구조</h3>
+          <p>수정 내용을 기록으로 남기고, 이후 다시 확인 가능한 구조로 정리했다.</p>
+        </article>
+      </div>
+
+      <div class="split-layout split-layout--result">
+        <article class="note-card">
+          <p class="card__label">다음 단계에서 검증할 요소</p>
+          <ul class="compact-list">
+            <li>재검토 대상을 더 빨리 찾는지</li>
+            <li>오류 메시지가 수정 행동으로 이어지는지</li>
+            <li>수정 이후 재작업이 줄어드는지</li>
+          </ul>
+        </article>
+
+        <figure class="screen-card">
+          <img src="./assets/screen-dashboard.png" alt="OMR 통계 대시보드 화면">
+          <figcaption>통계 화면. 결과를 저장하는 데서 멈추지 않고, 운영 단위로 다시 볼 수 있게 묶었다.</figcaption>
+        </figure>
+      </div>
+
+      <footer class="page__footer">
+        <span>결과와 다음 검증</span>
+        <span>구조적 변화와 후속 확인 포인트</span>
+      </footer>
+    </section>
+
+    <section class="page" id="page-6" data-page="6">
+      <header class="page__header">
+        <div>
+          <p class="eyebrow">Role Fit</p>
+          <p class="meta">NAVER WORKS 서비스 기획/운영 직무 연결</p>
+        </div>
+        <p class="page__number">06</p>
+      </header>
+
+      <div class="section-title">
+        <h2>NAVER WORKS에서<br>기여할 수 있는 문제</h2>
+        <p>나는 기능 추가보다 먼저 사용자의 다음 행동을 분명하게 만드는 문제에 강점이 있다.</p>
+      </div>
+
+      <div class="key-grid">
+        <article class="key-card">
+          <p class="card__label">기여 1</p>
+          <h3>온보딩 UX</h3>
+          <p>처음 쓰는 사람도 현재 상태와 다음 행동을 이해하게 만드는 화면 구조에 기여할 수 있다.</p>
+        </article>
+
+        <article class="key-card">
+          <p class="card__label">기여 2</p>
+          <h3>운영 화면 설계</h3>
+          <p>목록, 상태, 예외 항목을 한눈에 읽는 관리 화면을 설계하는 데 강점이 있다.</p>
+        </article>
+
+        <article class="key-card">
+          <p class="card__label">기여 3</p>
+          <h3>예외 기준 문서화와 고객지원 흐름</h3>
+          <p>오류 기준을 문서로 정리하고, 반복 문의를 줄이는 지원 흐름 설계로 이어질 수 있다.</p>
+        </article>
+      </div>
+
+      <article class="memory-card">
+        <p class="card__label">기억할 한 문장</p>
+        <h3>기능을 구현하는 데서 멈추지 않고, 사용자의 다음 행동이 분명한 운영 경험으로 바꾸는 사람.</h3>
+      </article>
+
+      <footer class="page__footer">
+        <span>직무 연결</span>
+        <span>온보딩 UX · 운영 화면 · 예외 기준 문서화</span>
+      </footer>
+    </section>
+  </main>
+
+  <script src="./omr_portfolio.js"></script>
+</body>
+</html>
