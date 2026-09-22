@@ -12,6 +12,7 @@ venv/
 .venv/
 .venv32/
 .venv64/
+.venv-build/
 env/
 ENV/
 
@@ -42,6 +43,7 @@ Thumbs.db
 ################################
 build/
 dist/
+release/
 *.spec
 
 ################################

@@ -1,0 +1,9 @@
+numpy==1.26.4
+opencv-python==4.10.0.84
+PySide2==5.15.2.1
+PySide2-Fluent-Widgets==1.11.1
+pytwain==2.3.0
+Pillow==10.4.0
+matplotlib==3.8.4
+pywin32==311
+pyinstaller==6.16.0

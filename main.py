@@ -105,7 +105,7 @@ except Exception as e:
 
 import PySide2  # noqa: F401
 from PySide2.QtCore import QObject, QEvent, Qt
-from PySide2.QtGui import QFont, QColor, QPalette
+from PySide2.QtGui import QFont, QColor, QPalette, QIcon
 from PySide2.QtWidgets import QApplication, QMessageBox, QWidget
 
 # On some Windows setups (especially non-ASCII paths), explicit plugin paths are safer.
@@ -222,6 +222,9 @@ def main():
         f"QT_FONT_DPI={os.environ.get('QT_FONT_DPI')}"
     )
     app = QApplication(sys.argv)
+    icon_path = os.path.join(os.path.dirname(__file__), "resources", "app_icon.ico")
+    if os.path.isfile(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     _log_startup("[Startup] QApplication created")
     _apply_global_white_mode(app)
     _log_startup("[Startup] global white mode applied")

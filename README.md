@@ -21,6 +21,16 @@ python -m pip install -r requirements.txt
 python main.py
 ```
 
+## Windows 설치 파일 만들기
+
+Python 3.10 64비트와 Inno Setup 6가 설치된 Windows에서 다음 명령을 실행합니다.
+
+```powershell
+.\packaging\build_installer.ps1
+```
+
+완성된 설치 파일은 `release\OMR_Project_Setup_v1.0.0.exe`에 생성됩니다. 설치 시 바탕화면 바로가기가 기본으로 만들어집니다.
+
 ## VS Code 설정
 
 - 인터프리터를 `.venv32\Scripts\python.exe`로 선택
